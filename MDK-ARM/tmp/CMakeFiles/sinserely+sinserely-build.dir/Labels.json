@@ -1,0 +1,37 @@
+{
+	"sources" : 
+	[
+		{
+			"file" : "D:/Desktop/sincerely/MDK-ARM/tmp/CMakeFiles/sinserely+sinserely-build"
+		},
+		{
+			"file" : "D:/Desktop/sincerely/MDK-ARM/tmp/CMakeFiles/sinserely+sinserely-build.rule"
+		},
+		{
+			"file" : "D:/Desktop/sincerely/MDK-ARM/tmp/sinserely+sinserely/src/sinserely+sinserely-stamp/sinserely+sinserely-build.rule"
+		},
+		{
+			"file" : "D:/Desktop/sincerely/MDK-ARM/tmp/sinserely+sinserely/src/sinserely+sinserely-stamp/sinserely+sinserely-configure.rule"
+		},
+		{
+			"file" : "D:/Desktop/sincerely/MDK-ARM/tmp/sinserely+sinserely/src/sinserely+sinserely-stamp/sinserely+sinserely-patch.rule"
+		},
+		{
+			"file" : "D:/Desktop/sincerely/MDK-ARM/tmp/sinserely+sinserely/src/sinserely+sinserely-stamp/sinserely+sinserely-update.rule"
+		},
+		{
+			"file" : "D:/Desktop/sincerely/MDK-ARM/tmp/sinserely+sinserely/src/sinserely+sinserely-stamp/sinserely+sinserely-download.rule"
+		},
+		{
+			"file" : "D:/Desktop/sincerely/MDK-ARM/tmp/sinserely+sinserely/src/sinserely+sinserely-stamp/sinserely+sinserely-mkdir.rule"
+		}
+	],
+	"target" : 
+	{
+		"labels" : 
+		[
+			"sinserely+sinserely"
+		],
+		"name" : "sinserely+sinserely-build"
+	}
+}

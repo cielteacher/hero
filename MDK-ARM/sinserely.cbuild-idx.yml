@@ -1,0 +1,21 @@
+build-idx:
+  generated-by: csolution version 2.13.0+p3-g40b6564e
+  csolution: sinserely.csolution.yml
+  tmpdir: tmp
+  cprojects:
+    - cproject: sinserely.cproject.yml
+  cbuilds:
+    - cbuild: out/sinserely/sinserely/sinserely+sinserely.cbuild.yml
+      project: sinserely
+      configuration: +sinserely
+      messages:
+        errors:
+          - sinserely.cproject.yml:231:11 - file 'D:/Desktop/sincerely/Desktop/sincerely/Drivers/CMSIS/DSP/Lib/ARM/arm_cortexM7lfdp_math.lib' was not found
+        warnings:
+          - file 'D:/Desktop/sincerely/MDK-ARM/.cmsis/sinserely+sinserely.dbgconf' not found; use --update-rte
+        info:
+          - sinserely.cbuild-pack.yml - file generated successfully
+          - sinserely+sinserely.cbuild.yml - file generated successfully
+      packs-unused:
+        - pack: ARM::CMSIS-DSP@1.17.0
+        - pack: ARM::CMSIS-NN@4.1.0

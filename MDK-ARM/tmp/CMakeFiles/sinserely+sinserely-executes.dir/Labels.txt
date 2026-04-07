@@ -1,0 +1,12 @@
+# Target labels
+ sinserely+sinserely
+# Source files and their labels
+D:/Desktop/sincerely/MDK-ARM/tmp/CMakeFiles/sinserely+sinserely-executes
+D:/Desktop/sincerely/MDK-ARM/tmp/CMakeFiles/sinserely+sinserely-executes.rule
+D:/Desktop/sincerely/MDK-ARM/tmp/sinserely+sinserely/src/sinserely+sinserely-stamp/sinserely+sinserely-executes.rule
+D:/Desktop/sincerely/MDK-ARM/tmp/sinserely+sinserely/src/sinserely+sinserely-stamp/sinserely+sinserely-build.rule
+D:/Desktop/sincerely/MDK-ARM/tmp/sinserely+sinserely/src/sinserely+sinserely-stamp/sinserely+sinserely-configure.rule
+D:/Desktop/sincerely/MDK-ARM/tmp/sinserely+sinserely/src/sinserely+sinserely-stamp/sinserely+sinserely-patch.rule
+D:/Desktop/sincerely/MDK-ARM/tmp/sinserely+sinserely/src/sinserely+sinserely-stamp/sinserely+sinserely-update.rule
+D:/Desktop/sincerely/MDK-ARM/tmp/sinserely+sinserely/src/sinserely+sinserely-stamp/sinserely+sinserely-download.rule
+D:/Desktop/sincerely/MDK-ARM/tmp/sinserely+sinserely/src/sinserely+sinserely-stamp/sinserely+sinserely-mkdir.rule

@@ -1,0 +1,8 @@
+D:/Desktop/sincerely/MDK-ARM/tmp/CMakeFiles/database.dir
+D:/Desktop/sincerely/MDK-ARM/tmp/CMakeFiles/sinserely+sinserely.dir
+D:/Desktop/sincerely/MDK-ARM/tmp/CMakeFiles/sinserely+sinserely-build.dir
+D:/Desktop/sincerely/MDK-ARM/tmp/CMakeFiles/sinserely+sinserely-configure.dir
+D:/Desktop/sincerely/MDK-ARM/tmp/CMakeFiles/sinserely+sinserely-executes.dir
+D:/Desktop/sincerely/MDK-ARM/tmp/CMakeFiles/sinserely+sinserely-database.dir
+D:/Desktop/sincerely/MDK-ARM/tmp/CMakeFiles/edit_cache.dir
+D:/Desktop/sincerely/MDK-ARM/tmp/CMakeFiles/rebuild_cache.dir

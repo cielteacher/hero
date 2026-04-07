@@ -1,0 +1,13 @@
+1 out of 1 target(s) converted
+
+Created solution: D:/Desktop/sincerely/MDK-ARM/sinserely.csolution.yml
+
+With projects:
+
+- D:/Desktop/sincerely/MDK-ARM/sinserely.cproject.yml
+
+Error: 0 error(s), 1 warning(s):
+
+Warnings:
+
+	 file 'D:/Desktop/sincerely/Desktop/sincerely/Drivers/CMSIS/DSP/Lib/ARM/arm_cortexM7lfdp_math.lib' does not exists
