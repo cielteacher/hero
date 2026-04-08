@@ -41,9 +41,8 @@
 
 // 输入模式枚举
 typedef enum {
-    STOP_INPUT = 0,          // 停止模式
-    REMOTE_INPUT = 1,        // 遥控器控制
-    KEY_MOUSE_INPUT = 2,     // 键鼠控制
+    REMOTE_INPUT = 0,        // 遥控器控制
+    KEY_MOUSE_INPUT = 1,     // 键鼠控制
 } InputMode_e;
 
 // 键位掩码定义

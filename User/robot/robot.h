@@ -188,7 +188,7 @@ typedef struct {
     eMidMode Mid_mode;              //!< 归中角度选择
     GimbalFeedback_e gimbal_fb;     //!< 云台反馈源 (由Cmd层根据IMU状态决定)
     bool Speed_Up_flag;             //!< 加速标志
-    
+    bool Unlimit_flag;             //!< 解除功率限制标志 (底盘)
     /* ===== 底盘控制量 ===== */
     float rotate_feedforward;       //!< 小陀螺前馈 (底盘陀螺仪反馈)
     float rotate_speed;             //!< 底盘旋转速度

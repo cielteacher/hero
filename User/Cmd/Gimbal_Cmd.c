@@ -1,13 +1,6 @@
 /**
  * @file    Gimbal_Cmd.c
  * @brief   云台决策层 - 输入解析与模式管理
- * 
- * @note    【模块职责】
- *          - 遥控器/键鼠输入解析
- *          - 云台/底盘/发射模式决策
- *          - 目标角度更新 (Gyro_/Mech_)
- *          - 板间CAN通信
- *          - 热量/卡弹检测
  */
 #include "Gimbal_Cmd.h"
 #include "bsp_fdcan.h"
@@ -22,16 +15,15 @@ static Gimbal_board_send_t Gimbal_To_Chassis;      // 云台->底盘速度
 static Gimbal_action_t Gimabl_To_Chassis_Action;   // 云台->底盘状态
 static Slope_s slope_X, slope_Y, slope_Omega;      // 速度斜坡规划
 static CANInstance *can_comm2;
-
+static uint8_t remote_online = 0;
+static uint8_t chassis_online = 0;
+static uint8_t gimbal_online = 0;
+static uint8_t shoot_online = 0;
 /* ==================== 内部函数声明 ==================== */
-static void Gimbal_Board_Update(void);
-static void Chassis_Board_Update(void);
 static void RCUpdate(void);
 static void KMUpdate(void);
-static void Jam_Check(void);
-static void Heat_Check(void);
-static void UpdateGimbalRef(void);
-
+static void Gimbal_Board_Update(void);
+static void Chassis_Board_Update(void);
 /**
  * @brief 检查云台模块在线状态
  */
@@ -57,17 +49,11 @@ static uint8_t IsShootModuleOnline(void)
             shoot.fric_motor_3->dji_motor_online_flag &&
             shoot.fric_motor_4->dji_motor_online_flag) ? 1U : 0U;
 }
-
-/**
- * @brief 检查是否允许视觉自瞄
- * @return 1=允许 (视觉在线且距离有效)
- */
-uint8_t VisionCanAutoAim(void)
+static uint8_t VisionCanAutoAim(void)
 {
     return (MiniPC_instance.MiniPC_Online_Flag &&
-            MiniPC_instance.receive_data.data.dis <= 0.2f) ? 1U : 0U;
+            MiniPC_instance.receive_data.data.dis <= 0.2f) ? 1 : 0;
 }
-
 /* ==================== 机器人初始化 ==================== */
 void Robot_Init(void)
 {
@@ -105,45 +91,33 @@ void Robot_Init(void)
 void Robot_Update(void)
 {
     // 获取在线状态
-    uint8_t remote_online = (DR16_instance.dr16_online_flag && !DR16_instance.dr16_data_error_flag) ? 1U : 0U;
-    uint8_t chassis_online = can_comm_instance.can_comm_online_flag ? 1U : 0U;
-    uint8_t gimbal_online = IsGimbalModuleOnline();
-    uint8_t shoot_online = IsShootModuleOnline();
-
+    remote_online = (DR16_instance.dr16_online_flag && !DR16_instance.dr16_data_error_flag) ? 1U : 0U;
+    chassis_online = can_comm_instance.can_comm_online_flag ? 1U : 0U;
+    gimbal_online = IsGimbalModuleOnline();
+    shoot_online = IsShootModuleOnline();
     // 设置默认状态
     robot_cmd.robot_state = ROBOT_RUNNING;
     robot_cmd.gimbal_mode = GIMBAL_RUNNING_FOLLOW;
     robot_cmd.chassis_mode = CHASSIS_RUNNING_FOLLOW;
-    robot_cmd.shoot_mode = SHOOT_STOP;
+    robot_cmd.shoot_mode = SHOOT_READY_NOFRIC;
     robot_cmd.Speed_Up_flag = false;
-    
-    // 更新状态包
-    Gimabl_To_Chassis_Action.Gimbal_Online = gimbal_online;
-    Gimabl_To_Chassis_Action.Shoot_Online = shoot_online;
-    Gimabl_To_Chassis_Action.Vision_Online = MiniPC_instance.MiniPC_Online_Flag;
-
-    // 遥控器或底盘通信离线 -> 紧急停止
-    if (!remote_online || !chassis_online)
+    // 遥控器离线 -> 紧急停止
+    if (!remote_online)
     {
         robot_cmd.robot_state = ROBOT_STOP;
-        robot_cmd.gimbal_mode = GIMBAL_STOP;
-        robot_cmd.chassis_mode = CHASSIS_STOP;
-        robot_cmd.shoot_mode = SHOOT_STOP;
         return;
     }
-    
+
     // 模块离线 -> 对应模块停止
     if (!gimbal_online)
         robot_cmd.gimbal_mode = GIMBAL_STOP;
     if (!shoot_online)
         robot_cmd.shoot_mode = SHOOT_STOP;
-    
+    if(!chassis_online)
+        robot_cmd.chassis_mode = CHASSIS_STOP;
     // 根据输入模式更新
     switch (DR16_instance.control_data.input_mode)
     {
-    case STOP_INPUT:
-        robot_cmd.robot_state = ROBOT_STOP;
-        break;
     case REMOTE_INPUT:
         robot_cmd.Control_mode = CONTROL_REMOTE;
         RCUpdate();
@@ -156,7 +130,6 @@ void Robot_Update(void)
         robot_cmd.robot_state = ROBOT_STOP;
         break;
     }
-
     // 停止状态下关闭所有模块
     if (robot_cmd.robot_state == ROBOT_STOP)
     {
@@ -166,28 +139,6 @@ void Robot_Update(void)
         return;
     }
 
-    /**
-     * @brief 云台反馈源决策 - 关键决策段
-     *
-     * 决策优先级:
-     * 1. NORMAL模式始终使用机械角反馈 (FB_MECH)
-     *    原因: NORMAL模式用于独立手动控制，需要直接编码器反馈
-     * 2. IMU离线触发自动降级为FB_MECH
-     *    原因: 无IMU情况下，所有模式都只能用机械反馈
-     * 3. IMU在线 + 非NORMAL模式使用陀螺仪反馈 (FB_GYRO)
-     *    原因: 跟随/自瞄/小陀螺模式需要IMU支持
-     *
-     * 逻辑流程:
-     *   if (NORMAL模式) || (IMU离线)
-     *       -> FB_MECH (机械角反馈)
-     *   else
-     *       -> FB_GYRO (陀螺仪反馈)
-     *
-     * 更新策略:
-     *   - Cmd层: 每周期做一次决策
-     *   - Execute层: 直接使用已决策的gimbal_fb
-     *   - 无重复: 避免重复检查IMU状态
-     */
     if (robot_cmd.gimbal_mode == GIMBAL_RUNNING_NORMAL || !INS_Info.INS_online_flag)
     {
         // 机械角反馈: 用于直接编码器控制
@@ -198,9 +149,6 @@ void Robot_Update(void)
         // 陀螺仪反馈: 用于IMU力量的稳定控制
         robot_cmd.gimbal_fb = GIMBAL_FB_GYRO;
     }
-
-    // 更新云台目标角度 (同时维护Gyro_*和Mech_*参考值)
-    UpdateGimbalRef();
     
     // 更新板间数据
     Gimbal_Board_Update();
@@ -222,7 +170,7 @@ static void RCUpdate(void)
     // 默认: 底盘跟随云台
     robot_cmd.gimbal_mode = GIMBAL_RUNNING_FOLLOW;
     robot_cmd.chassis_mode = CHASSIS_RUNNING_FOLLOW;
-    robot_cmd.shoot_mode = SHOOT_STOP;
+    robot_cmd.shoot_mode = SHOOT_READY_NOFRIC;
 
     // fn1按住: 启动摩擦轮
     if (DR16_instance.control_data.fn_1)
@@ -236,20 +184,11 @@ static void RCUpdate(void)
             robot_cmd.chassis_mode = CHASSIS_RUNNING_NORMAL;
             robot_cmd.shoot_mode = VisionCanAutoAim() ? SHOOT_AIM : SHOOT_READY;
         }
-
         // fn1+trigger: 手动开火
         if (DR16_instance.control_data.trigger)
         {
             robot_cmd.shoot_mode = SHOOT_FIRE;
         }
-    }
-
-    // 拨轮控制小陀螺
-    if (fabsf(DR16_instance.control_data.Normalize_wheel) > 0.08f)
-    {
-        robot_cmd.gimbal_mode = GIMBAL_RUNNING_SPIN;
-        robot_cmd.chassis_mode = CHASSIS_RUNNING_SPIN;
-        robot_cmd.rotate_speed = DR16_instance.control_data.Normalize_wheel * (float)rotate_speed_MAX;
     }
 }
 
@@ -271,33 +210,23 @@ static void KMUpdate(void)
 {
     // 静态变量保存toggle状态
     static uint8_t fric_toggle = 0;
-    static uint8_t unlimit_toggle = 0;
-    static uint8_t last_fric_cnt = 0;
-    static uint8_t last_unlimit_cnt = 0;
-    static uint8_t last_reset_cnt = 0;
+
     static uint8_t last_turn_cnt = 0;
 
     // Ctrl+R: 系统复位
-    uint8_t reset_cnt = DR16_instance.control_data.key_count[KEY_PRESS_WITH_CTRL][key_R];
-    if (reset_cnt != last_reset_cnt)
+    if (DR16_instance.control_data.key_count[KEY_PRESS_WITH_CTRL][key_R] % 2 )
     {
-        last_reset_cnt = reset_cnt;
         NVIC_SystemReset();
     }
-
     // Ctrl+G: 底盘解限切换
-    uint8_t unlimit_cnt = DR16_instance.control_data.key_count[KEY_PRESS_WITH_CTRL][key_G];
-    if (unlimit_cnt != last_unlimit_cnt)
+    if ( DR16_instance.control_data.key_count[KEY_PRESS_WITH_CTRL][key_G] % 2)
     {
-        last_unlimit_cnt = unlimit_cnt;
-        unlimit_toggle ^= 1U;
+        robot_cmd.Unlimit_flag ^= 1U;
     }
 
     // B: 摩擦轮切换
-    uint8_t fric_cnt = DR16_instance.control_data.key_count[KEY_PRESS][key_B];
-    if (fric_cnt != last_fric_cnt)
+    if (DR16_instance.control_data.key_count[KEY_PRESS][key_B] & 2)
     {
-        last_fric_cnt = fric_cnt;
         fric_toggle ^= 1U;
     }
 
@@ -414,7 +343,10 @@ static void Chassis_Board_Update(void)
 {
     if (can_comm_instance.can_comm_online_flag == 0)
         return;
-
+        // 更新状态包
+    Gimabl_To_Chassis_Action.Gimbal_Online = gimbal_online;
+    Gimabl_To_Chassis_Action.Shoot_Online = shoot_online;
+    Gimabl_To_Chassis_Action.Vision_Online = MiniPC_instance.MiniPC_Online_Flag;
     Gimbal_To_Chassis.Unlimit_flag = (robot_cmd.chassis_mode == CHASSIS_RUNNING_UNLIMIT) ? 1U : 0U;
 
     if (robot_cmd.robot_state == ROBOT_STOP)
@@ -440,6 +372,13 @@ static void Chassis_Board_Update(void)
             planningV.Y = DR16_instance.control_data.Normalize_ch2 * LEVEL_GAIN * 2.0f;
             planningV.X = DR16_instance.control_data.Normalize_ch3 * LEVEL_GAIN;
             planningV.Omega = DR16_instance.control_data.Normalize_ch1 * LEVEL_GAIN;
+        // 拨轮控制小陀螺
+        if (fabsf(DR16_instance.control_data.Normalize_wheel) > 0.08f)
+        {
+        robot_cmd.gimbal_mode = GIMBAL_RUNNING_SPIN;
+        robot_cmd.chassis_mode = CHASSIS_RUNNING_SPIN;
+        robot_cmd.rotate_speed = DR16_instance.control_data.Normalize_wheel * (float)rotate_speed_MAX;
+        }
         }
         else // �������
         {
@@ -482,7 +421,7 @@ static void Chassis_Board_Update(void)
 }
 
 /**
- * @brief ������� (����ʱ��ز�����״̬)
+ * @brief 卡弹检测 - 通过速度和电流异常判断
  */
 static void Jam_Check(void)
 {

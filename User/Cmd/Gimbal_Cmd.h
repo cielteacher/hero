@@ -16,8 +16,6 @@
 /* ============ 函数声明 ============ */
 void Robot_Init(void);
 void Robot_Update(void);
-uint8_t VisionCanAutoAim(void);
-
 /* ============ 全局变量声明 ============ */
 extern Robot_ctrl_cmd_t robot_cmd;
 

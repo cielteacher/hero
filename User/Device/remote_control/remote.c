@@ -106,9 +106,6 @@ static void SBUS_TO_RC(uint8_t *sbus_buf)
     // 更新输入模式
     switch (instance->control_data.mode_sw)
     {
-        case RC_MODE_STOP:
-            instance->control_data.input_mode = STOP_INPUT;
-            break;
         case RC_MODE_REMOTE:
             instance->control_data.input_mode = REMOTE_INPUT;
             break;
@@ -116,7 +113,6 @@ static void SBUS_TO_RC(uint8_t *sbus_buf)
             instance->control_data.input_mode = KEY_MOUSE_INPUT;
             break;
         default:
-            instance->control_data.input_mode = STOP_INPUT;
             break;
     }
     
