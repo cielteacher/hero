@@ -7,16 +7,6 @@
  *          - 双环PID闭环控制 (位置环+速度环)
  *          - 电机指令输出
  *          - 参考角度限位
- *          
- *          【数据流向】
- *          robot_cmd (由Gimbal_Cmd.c更新) --> Motor_Control() --> CAN发送
- *          
- *          【反馈源选择】
- *          - IMU在线时: 陀螺仪反馈 (INS_Info) + 陀螺仪参考 (Gyro_*)
- *          - IMU离线时: 机械角反馈 (编码器) + 机械角参考 (Mech_*)
- *          - NORMAL模式: 始终使用机械角
- *          
- *          【控制周期】 1ms (由Task_Robot_Control调用)
  */
 #include "Gimbal.h"
 #include "PID.h"
@@ -33,7 +23,7 @@
 /* ==================== 全局实例 ==================== */
 Gimbal_t gimbal = {0};
 extern Robot_ctrl_cmd_t robot_cmd;
-
+extern uint8_t imu_online;
 /* ==================== PID模式定义 ==================== */
 /**
  * @brief PID参数组索引
@@ -45,16 +35,6 @@ typedef enum {
     PID_CENTER = 2,  // 归中控制 (快速响应)
     PID_AIM    = 3,  // 自瞄模式 (高精度跟踪)
 } GimbalPidMode_e;
-
-/**
- * @brief 反馈源类型
- * @note  用于Motor_Control()选择反馈来源
- */
-typedef enum {
-    FB_GYRO = 0,  // 使用陀螺仪反馈
-    FB_MECH = 1,  // 使用机械角反馈
-} FeedbackSource_e;
-
 /* ==================== 底盘跟随PID ==================== */
 // 位置环: 计算底盘应旋转的速度目标
 static PID_Smis Chassis_Rotate_PIDS = {
@@ -116,12 +96,11 @@ static PID Pitch_Speed_PID[4] = {
 
 /* ==================== 内部函数声明 ==================== */
 static void Gimbal_Stop(void);
-static void Motor_Control(GimbalPidMode_e pid_mode, FeedbackSource_e fb_src);
-static void Pitch_Limit(FeedbackSource_e fb_src);
+static void Motor_Control(GimbalPidMode_e pid_mode, uint8_t imu_online);
+static void Pitch_Limit(uint8_t imu_online);
 static void Chassis_Follow_Calc(void);
-static void Rotate_Speed_Set(void);
 static int32_t Gimbal_CenterAlign(int32_t yaw_now);
-static void GetFeedbackData(FeedbackSource_e fb_src, float *yaw_fdb, float *pitch_fdb,
+static void GetFeedbackData(uint8_t imu_online, float *yaw_fdb, float *pitch_fdb,
                              float *yaw_rate, float *pitch_rate, float *yaw_ref, float *pitch_ref);
 
 /* VisionCanAutoAim() 由 Gimbal_Cmd.c 定义 */
@@ -173,124 +152,59 @@ void Gimbal_Init(void)
  *        5. 选择PID参数 (根据模式)
  *        6. 执行统一的电机控制
  *
- * 关键改进: 单一IMU决策点
- * - 旧: Gimbal_Control()重复判断IMU (冗余)
- * - 新: 使用Cmd层已决策的gimbal_fb
- * - 结果: 代码清晰，易于维护
- *
- * 反馈源策略:
- * - FB_GYRO: 用于跟随/自瞄/小陀螺 (需要IMU)
- * - FB_MECH: 用于NORMAL模式或IMU离线
  */
 void Gimbal_Control(void)
 {
-    // 状态: 停止模式 → 电机停转并同步参考角度
-    if (robot_cmd.gimbal_mode == GIMBAL_STOP)
-    {
-        Gimbal_Stop();
-        return;
-    }
-
-    // 获取已决策的反馈源 (由Cmd层根据IMU状态决定)
-    // 不需要在此再检查IMU状态 - Cmd层已处理
-    FeedbackSource_e fb_src = (FeedbackSource_e)robot_cmd.gimbal_fb;
-
     // 根据反馈源统一处理限位
-    // 防止机械越界或IMU角度越限
-    Pitch_Limit(fb_src);
-
-    /**
-     * @brief IMU离线降级逻辑
-     *
-     * 条件: FB_MECH (由Cmd层在IMU离线时设置) && !NORMAL模式
-     * 原因: IMU失信号时，除NORMAL外的所有模式应该
-     *       降级到机械角反馈 + 机械PID参数
-     * 效果: 优雅降级 - 机器人继续工作，但失去稳定性
-     *
-     * 示例场景:
-     * - FOLLOW模式+IMU离线 → 降级到机械角+PID_MECH
-     * - SPIN模式+IMU离线   → 降级到机械角+PID_MECH
-     * - NORMAL模式         → 始终使用机械角(无需改变)
-     */
-    if (fb_src == FB_MECH && robot_cmd.gimbal_mode != GIMBAL_RUNNING_NORMAL)
-    {
-        // IMU失效时的直接机械控制
-        Motor_Control(PID_MECH, FB_MECH);
-        return;
-    }
-
-    /**
-     * @brief 模式→PID参数映射
-     *
-     * 这个映射根据云台模式选择合适的PID参数集。
-     * 每个模式都有独特的控制特性:
-     * - PID_GYRO: 快速响应，用于跟随/小陀螺 (陀螺仪反馈)
-     * - PID_MECH: 稳定控制，用于NORMAL模式 (机械反馈)
-     * - PID_AIM:  精准跟踪，用于自瞄 (高增益)
-     * - PID_CENTER: 归中动作 (当前未使用)
-     */
-    GimbalPidMode_e pid_mode = PID_GYRO;  // 默认参数集
-
+    Pitch_Limit(imu_online);
+    // 根据模式选择PID参数并控制电机
+    int16_t can_send[4] = {0};
     switch (robot_cmd.gimbal_mode)
     {
+    case GIMBAL_STOP:
+        Gimbal_Stop();
+        return;
+    case GIMBAL_MIDDLE:
+        // 归中模式: 直接设置目标角度为归中位置, 使用专门的PID参数快速收敛(机械反馈)
+        // ===== Yaw轴双环 =====
+        // 位置环: 将角度误差转换为速度指令
+        
+        PID_Control_Smis(gimbal.yaw_motor->Data.DJI_data.MechanicalAngle, Yaw_Mid_Front, &Yaw_Pos_PID[PID_CENTER], gimbal.yaw_motor->Data.DJI_data.SpeedFilter);
+        // 速度环: 跟随模式时叠加前馈补偿
+        PID_Control(gimbal.yaw_motor->Data.DJI_data.SpeedFilter, Yaw_Pos_PID[PID_CENTER].pid_out, &Yaw_Speed_PID[PID_CENTER]);
+        // ===== Pitch轴双环 =====
+        // 位置环: 将角度误差转换为速度指令
+        PID_Control_Smis(gimbal.pitch_motor->Data.DJI_data.MechanicalAngle, Pitch_Mid, &Pitch_Pos_PID[PID_CENTER], gimbal.pitch_motor->Data.DJI_data.SpeedFilter);
+        // 速度环: 从速度误差转换电机电流
+        PID_Control(gimbal.pitch_motor->Data.DJI_data.SpeedFilter, Pitch_Pos_PID[PID_CENTER].pid_out, &Pitch_Speed_PID[PID_CENTER]);
+        // ===== 发送CAN电机指令 =====
+        can_send[0] = (int16_t)Pitch_Speed_PID[PID_CENTER].pid_out;
+        can_send[1] = (int16_t)Yaw_Speed_PID[PID_CENTER].pid_out;
+        DM_Motor_DJI_CAN_TxMessage(gimbal.yaw_motor, can_send);
+        return;
     case GIMBAL_RUNNING_FOLLOW:
         // 底盘跟随模式: 计算底盘旋转以保持云台居中
         Chassis_Follow_Calc();
-        pid_mode = PID_GYRO;  // 使用陀螺仪PID参数
+    case GIMBAL_RUNNING_NORMAL:
+        // 底盘分离模式: 直接使用PID控制云台角度 (根据IMU在线状态选择反馈源)
+        // 两种模式共用电机控制，IMU在线时使用陀螺仪角度控制，离线时降级使用机械角度控制
+        Motor_Control(PID_GYRO, imu_online);
         break;
 
     case GIMBAL_RUNNING_AIM:
         // 自瞄模式: 有目标用AIM参数, 无目标降级用GYRO
-        // 这避免了目标丢失时的抖动现象
-        pid_mode = VisionCanAutoAim() ? PID_AIM : PID_GYRO;
+        Motor_Control( PID_AIM,imu_online);
         break;
-
-    case GIMBAL_RUNNING_SPIN:
-        // 小陀螺模式: 根据装甲板朝向动态调整旋转速度
-        Rotate_Speed_Set();
-        pid_mode = PID_GYRO;  // 使用陀螺仪PID参数
-        break;
-
-    case GIMBAL_RUNNING_NORMAL:
-        // 普通模式: 直接编码器控制
-        pid_mode = PID_MECH;  // 使用机械角PID参数
-        break;
-
     default:
         // 未知模式: 停止
         Gimbal_Stop();
         return;
     }
-
-    // 统一的PID控制执行 (使用选定的参数和反馈源)
-    Motor_Control(pid_mode, fb_src);
 }
 
 /* ==================== 云台停止 ==================== */
 /**
  * @brief 云台停止 - 电机禁用并同步参考角度
- *
- * 调用时机:
- * - 机器人进入STOP状态 (紧急关闭)
- * - 云台收到GIMBAL_STOP指令
- * - 系统故障检测到
- *
- * 关键动作:
- * 1. 禁用电机 (防止失控)
- * 2. 清除所有PID积分项 (防止积分饱和)
- * 3. 同步参考角度到当前反馈
- *    目的: 云台恢复时不会有突跳
- *    原理: (参考值 = 反馈值 => 误差 = 0, 平滑启动)
- *
- * 参考值同步策略:
- * - Mech_Yaw/Pitch: 同步到编码器反馈
- *   何时: 恢复使用机械反馈 (NORMAL模式或IMU离线)
- * - Gyro_Yaw/Pitch: 同步到IMU反馈
- *   何时: 恢复使用陀螺仪反馈 (跟随/自瞄/小陀螺模式+IMU在线)
- *
- * 好处: 停止后平滑过渡, 无突跳运动
- *
- * @note 这个函数必须在停止时调用以保证系统完整性
  */
 static void Gimbal_Stop(void)
 {
@@ -307,12 +221,10 @@ static void Gimbal_Stop(void)
     }
 
     // === 同步机械角参考值 ===
-    // 使用场景: NORMAL模式或IMU离线 (机械反馈)
     robot_cmd.Mech_Yaw = gimbal.yaw_motor->Data.DJI_data.Continuous_Mechanical_angle;
     robot_cmd.Mech_Pitch = gimbal.pitch_motor->Data.DJI_data.MechanicalAngle;
 
     // === 同步陀螺仪角参考值 ===
-    // 使用场景: 跟随/自瞄/小陀螺模式+IMU在线 (陀螺仪反馈)
     robot_cmd.Gyro_Yaw = INS_Info.Yaw_TolAngle;
     robot_cmd.Gyro_Pitch = INS_Info.Pitch_Angle;
 }
@@ -345,17 +257,6 @@ static void Gimbal_Stop(void)
  * │ 4. 选择最小距离点                 │
  * │ 5. 返回: 当前位置 + 最小距离      │
  * └───────────────────────────────────┘
- *
- * 示例:
- * - 当前角度: 7000 (接近0°)
- * - 前方点: 1000
- * - 后方点: 5096 (180°)
- * - 最近: 前方 (距离 = 1000-7000+8192 = 2192)
- *
- * @param yaw_now 当前连续机械角
- * @return 目标连续机械角 (可跨越多圈)
- *
- * @note "连续"表示角度可超出[0,8191]用于多圈跟踪
  */
 static int32_t Gimbal_CenterAlign(int32_t yaw_now)
 {
@@ -408,7 +309,6 @@ static int32_t Gimbal_CenterAlign(int32_t yaw_now)
 /* ==================== Pitch轴限位 ==================== */
 /**
  * @brief 限制Pitch轴运动范围
- *
  * Pitch限位范围:
  * ┌─────────────────────────────────────────────────┐
  * │ 反馈源    │ 最小/最大      │ 单位   │ 典型值   │
@@ -416,35 +316,17 @@ static int32_t Gimbal_CenterAlign(int32_t yaw_now)
  * │ FB_GYRO   │ -6° ~ 42°      │ 度     │ IMU角   │
  * │ FB_MECH   │ 4800~6000编码器│ 值     │ 编码器  │
  * └─────────────────────────────────────────────────┘
- *
- * 为什么需要两套限位?
- * - 不同反馈源有不同特性:
- *   - 陀螺仪: 相对机体的角度 (平滑, 范围有限)
- *   - 机械: 绝对编码器位置 (全范围, 物理限制)
- * - 限位必须匹配反馈源类型以防越界
- *
- * 调用时机:
- * - Gimbal_Control()开始时总是调用
- * - 在模式切换前处理
- * - 保护云台机械结构不要超界
- *
- * @param fb_src 反馈源类型 (决定使用哪套限位)
- *
- * 实现原理:
- * limit()函数将值限制在[min, max]范围内:
- *   if (value > max) value = max;
- *   if (value < min) value = min;
  */
-static void Pitch_Limit(FeedbackSource_e fb_src)
+static void Pitch_Limit(uint8_t imu_online)
 {
-    if (fb_src == FB_GYRO)
+    if (imu_online)
     {
         // IMU坐标系限位 (单位: 度)
         // 范围: [-6°, 42°] - RoboMaster云台典型值
         // -6° = 地平面下6°, 42° = 地平面上42°
         robot_cmd.Gyro_Pitch = limit(robot_cmd.Gyro_Pitch, IMU_UP_limit, IMU_DOWN_limit);
     }
-    else  // FB_MECH
+    else  
     {
         // 机械编码器限位 (单位: 编码器计数)
         // 防止电机打到机械停止块
@@ -485,26 +367,12 @@ static void Chassis_Follow_Calc(void)
  * 目的: 集中管理反馈源数据初始化，消除代码重复，提高可维护性
  * 所有数据源都在一处处理
  *
- * @param fb_src 输入 - 反馈源 (FB_GYRO 或 FB_MECH)
- * @param yaw_fdb, pitch_fdb       输出 - 位置反馈指针
- * @param yaw_rate, pitch_rate     输出 - 速度反馈指针
- * @param yaw_ref, pitch_ref       输出 - 参考角度指针
- *
- * 反馈源详解:
- * - FB_MECH: 编码器反馈 (Continuous_Mechanical_angle, MechanicalAngle)
- *            用于直接机械控制 (NORMAL模式或IMU离线)
- *            单位: 编码器值 (每圈8192)
- *
- * - FB_GYRO: IMU反馈 (Yaw_TolAngle, Pitch_Angle from INS_Info)
- *            用于稳定控制 (跟随/自瞄/小陀螺模式)
- *            单位: 度
- *
  * 代码精简: 消除Motor_Control()内~20行重复代码
  */
-static void GetFeedbackData(FeedbackSource_e fb_src, float *yaw_fdb, float *pitch_fdb,
+static void GetFeedbackData(uint8_t imu_online, float *yaw_fdb, float *pitch_fdb,
                             float *yaw_rate, float *pitch_rate, float *yaw_ref, float *pitch_ref)
 {
-    if (fb_src == FB_MECH)
+    if (imu_online == 0)
     {
         // 机械角反馈 (编码器反馈，原始电机信号)
         *yaw_fdb = (float)gimbal.yaw_motor->Data.DJI_data.Continuous_Mechanical_angle;
@@ -514,7 +382,7 @@ static void GetFeedbackData(FeedbackSource_e fb_src, float *yaw_fdb, float *pitc
         *yaw_ref = (float)robot_cmd.Mech_Yaw;
         *pitch_ref = (float)robot_cmd.Mech_Pitch;
     }
-    else  // FB_GYRO
+    else  // imu_online == 1
     {
         // 陀螺仪反馈 (IMU反馈，稳定的角度信号)
         *yaw_fdb = INS_Info.Yaw_TolAngle;
@@ -559,17 +427,17 @@ static void GetFeedbackData(FeedbackSource_e fb_src, float *yaw_fdb, float *pitc
  * 4. Pitch轴双环 (结构相同)
  * 5. 通过CAN发送电机指令
  */
-static void Motor_Control(GimbalPidMode_e pid_mode, FeedbackSource_e fb_src)
+static void Motor_Control(GimbalPidMode_e pid_mode, uint8_t  imu_online)
 {
-    int16_t can_send[4] = {0};
+
     float yaw_fdb, pitch_fdb, yaw_rate, pitch_rate, yaw_ref, pitch_ref;
 
     // 统一获取反馈数据 (消除分支)
-    GetFeedbackData(fb_src, &yaw_fdb, &pitch_fdb, &yaw_rate, &pitch_rate, &yaw_ref, &pitch_ref);
+    GetFeedbackData(imu_online, &yaw_fdb, &pitch_fdb, &yaw_rate, &pitch_rate, &yaw_ref, &pitch_ref);
 
     // 计算小陀螺前馈补偿 (仅陀螺仪反馈时)
     // 补偿底盘旋转对云台的影响
-    if (fb_src == FB_GYRO)
+    if (imu_online == 1)
     {
         FeedForward_Calc(&GimbalYaw_FF, robot_cmd.rotate_feedforward);
     }
@@ -580,7 +448,7 @@ static void Motor_Control(GimbalPidMode_e pid_mode, FeedbackSource_e fb_src)
 
     // 速度环: 跟随模式时叠加前馈补偿
     float yaw_speed_ref = Yaw_Pos_PID[pid_mode].pid_out;
-    if (fb_src == FB_GYRO && robot_cmd.gimbal_mode == GIMBAL_RUNNING_FOLLOW)
+    if (imu_online == 1 && robot_cmd.gimbal_mode == GIMBAL_RUNNING_FOLLOW)
     {
         // 前馈: 直接使用底盘旋转指令+云台补偿
         yaw_speed_ref = Chassis_Rotate_PIDS.pid_out + GimbalYaw_FF.Out;

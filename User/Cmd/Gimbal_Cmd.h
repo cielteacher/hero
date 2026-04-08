@@ -18,5 +18,5 @@ void Robot_Init(void);
 void Robot_Update(void);
 /* ============ 全局变量声明 ============ */
 extern Robot_ctrl_cmd_t robot_cmd;
-
+extern uint8_t imu_online;
 #endif // __GIMBAL_CMD_H

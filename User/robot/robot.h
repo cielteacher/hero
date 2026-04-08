@@ -48,7 +48,7 @@
 #define Yaw_Mid_Right (Yaw_Mid_Back + 2048)
 #endif
 
-#define Pitch_Mid 5416  //!< Pitch轴电机中值 [0~8191]
+#define Pitch_Mid 234  //!< Pitch轴电机中值 [0~8191]
 
 /* ============ Pitch轴限位 ============ */
 #define IMU_UP_limit     42.0f   //!< IMU坐标系上限位 (度)
@@ -124,8 +124,8 @@ typedef enum {
 typedef enum {
     GIMBAL_STOP = 0,       //!< 停止
     GIMBAL_RUNNING_FOLLOW, //!< 底盘跟随云台
+    GIMBAL_MIDDLE,         //!< 归中模式
     GIMBAL_RUNNING_AIM,    //!< 自瞄模式
-    GIMBAL_RUNNING_SPIN,   //!< 小陀螺模式
     GIMBAL_RUNNING_NORMAL  //!< 底盘分离模式
 } GimbalState_e;
 
@@ -157,14 +157,6 @@ typedef enum {
     MID_BACK = 2,   //!< 后方归中
 } eMidMode;
 
-/**
- * @brief 云台反馈源模式
- * @note  由Gimbal_Cmd根据IMU在线状态决定，Gimbal执行层直接使用
- */
-typedef enum {
-    GIMBAL_FB_GYRO = 0,  //!< 陀螺仪反馈 (IMU在线)
-    GIMBAL_FB_MECH = 1,  //!< 机械角反馈 (IMU离线或NORMAL模式)
-} GimbalFeedback_e;
 
 /**
  * @brief 机器人控制命令结构体
@@ -186,7 +178,6 @@ typedef struct {
     ChassisState_e chassis_mode;    //!< 底盘模式
     ShootState_e shoot_mode;        //!< 发射模式
     eMidMode Mid_mode;              //!< 归中角度选择
-    GimbalFeedback_e gimbal_fb;     //!< 云台反馈源 (由Cmd层根据IMU状态决定)
     bool Speed_Up_flag;             //!< 加速标志
     bool Unlimit_flag;             //!< 解除功率限制标志 (底盘)
     /* ===== 底盘控制量 ===== */

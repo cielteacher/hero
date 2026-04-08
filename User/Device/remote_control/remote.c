@@ -28,7 +28,6 @@ void DR16_Init(void)
     DR16_instance.dr16_data_error_flag = 0;
     DR16_instance.dr16_online_flag = 0;
     DR16_instance.dr16_last_rx_ms = DWT_GetTime_ms();
-    DR16_instance.control_data.input_mode = STOP_INPUT;
     
     DR16_instance.USART_instance = USARTRegister(&DR16_config);
     if (DR16_instance.USART_instance != NULL)
@@ -256,7 +255,6 @@ void DR16_AliveCheck(void)
         
         // 清零数据并标记离线
         memset((void*)&DR16_instance.control_data, 0, sizeof(Ctrl_data));
-        DR16_instance.control_data.input_mode = STOP_INPUT;
         DR16_instance.dr16_online_flag = 0;
     }
     else

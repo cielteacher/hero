@@ -90,7 +90,57 @@ void Shoot_Init(void)
     robot_cmd.shoot_mode = SHOOT_STOP;
     shoot.pluck_target_angle = 0;
 }
+/**
+ * @brief 卡弹检测 - 通过速度和电流异常判断
+ */
+static void Jam_Check(void)
+{
+    static uint16_t stuck_time = 0;
 
+    if (robot_cmd.shoot_mode == SHOOT_FIRE || robot_cmd.shoot_mode == SHOOT_AIM)
+    {
+        // ��⿨���������ٶȹ��� �� ��������
+        if (fabsf(shoot.Pluck_motor->Data.SpeedFilter) <= 50.0f ||
+            fabsf(shoot.Pluck_motor->Data.CurrentFilter) >= 5000.0f)
+        {
+            stuck_time++;
+            if (stuck_time >= UNJAM_TIME)
+            {
+                robot_cmd.shoot_mode = SHOOT_STUCKING;
+            }
+        }
+        else
+        {
+            stuck_time = 0;
+        }
+    }
+    else
+    {
+        stuck_time = 0;
+    }
+}
+
+/* ==================== 热量检测 ==================== */
+static void Heat_Check(void)
+{
+    if (can_comm_instance.can_comm_online_flag == 0)
+    {
+        robot_cmd.shoot_mode = SHOOT_STOP;
+        return;
+    }
+
+    if (robot_cmd.shoot_mode == SHOOT_FIRE || robot_cmd.shoot_mode == SHOOT_AIM)
+    {
+        uint16_t remain = can_comm_instance.can_comm_rx_data.heat_limit_remain;
+        uint8_t cooling_rate = can_comm_instance.can_comm_rx_data.shoot_barrel_cooling;
+
+        // 剩余热量不足时进入冷却
+        if ((float)remain + cooling_rate * 0.001f < SHOOT_UNIT_HEAT_42MM * 1.2f)
+        {
+            robot_cmd.shoot_mode = SHOOT_COOLING;
+        }
+    }
+}
 /* ============ 发射机构主控制函数 - 1ms周期 ============ */
 void Shoot_Control(void)
 {
