@@ -124,7 +124,6 @@ typedef enum {
 typedef enum {
     GIMBAL_STOP = 0,       //!< 停止
     GIMBAL_RUNNING_FOLLOW, //!< 底盘跟随云台
-    GIMBAL_MIDDLE,         //!< 归中模式
     GIMBAL_RUNNING_AIM,    //!< 自瞄模式
     GIMBAL_RUNNING_NORMAL  //!< 底盘分离模式
 } GimbalState_e;
@@ -137,7 +136,6 @@ typedef enum {
     CHASSIS_RUNNING_FOLLOW,  //!< 跟随云台
     CHASSIS_RUNNING_SPIN,    //!< 小陀螺
     CHASSIS_RUNNING_NORMAL,  //!< 独立移动
-    CHASSIS_RUNNING_UNLIMIT  //!< 解除功率限制
 } ChassisState_e;
 
 /**

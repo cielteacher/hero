@@ -7,6 +7,7 @@
 #include "Shoot.h"
 #include "MiniPC.h"
 #include "robot.h"
+#include "can_comm.h"
 
 /* ============ 发射机构实例 ============ */
 Shoot_t shoot = {0};
@@ -43,10 +44,13 @@ static PID Pluck_Speed_PID = {
     .DeadBand = 0.0f, .inter_threLow = 20, .inter_threUp = 5000
 };
 
+static uint8_t single_fire_state = 0;
+
 /* ============ 函数声明 ============ */
 static void Shoot_Stop(void);
 static void Fric_Wheel_Control(void);
 static void Single_Fire(void);
+static void Single_Fire_Reset(void);
 static void Jam_Handle(void);
 static void Pluck_Hold(void);
 static uint8_t VisionFireAllowed(void);
@@ -144,6 +148,15 @@ static void Heat_Check(void)
 /* ============ 发射机构主控制函数 - 1ms周期 ============ */
 void Shoot_Control(void)
 {
+    // 每个控制周期先做安全检查，再进入状态机
+    Heat_Check();
+    Jam_Check();
+
+    if (robot_cmd.shoot_mode != SHOOT_FIRE && robot_cmd.shoot_mode != SHOOT_AIM)
+    {
+        Single_Fire_Reset();
+    }
+
     switch (robot_cmd.shoot_mode)
     {
         case SHOOT_STOP:
@@ -215,6 +228,7 @@ static void Shoot_Stop(void)
     DJIMotorStop(shoot.fric_motor_3);
     DJIMotorStop(shoot.fric_motor_4);
     DJIMotorStop(shoot.Pluck_motor);
+    Single_Fire_Reset();
     
     // 清除PID积分项
     for (uint8_t i = 0; i < 4; i++)
@@ -246,12 +260,10 @@ static void Pluck_Hold(void)
 /* ============ 单发控制 ============ */
 static void Single_Fire(void)
 {
-
-    static uint8_t fire_state = 0;  // 0:等待触发 1:正在发射
-    if (fire_state == 0)
+    if (single_fire_state == 0)
     {
         shoot.pluck_target_angle =shoot.Pluck_motor->Data.Continuous_Mechanical_angle  + PLUCK_SINGLE_ANGLE;
-        fire_state = 1;
+        single_fire_state = 1;
     }
     
     // 双环PID控制
@@ -270,8 +282,13 @@ static void Single_Fire(void)
     {
         robot_cmd.shoot_mode = SHOOT_READY;
         shoot.pluck_lock = 0;
-        fire_state = 0;
+        single_fire_state = 0;
     }
+}
+
+static void Single_Fire_Reset(void)
+{
+    single_fire_state = 0;
 }
 
 /**

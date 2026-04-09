@@ -24,8 +24,8 @@ uint8_t imu_online = 0;
 /* ==================== 内部函数声明 ==================== */
 static void RCUpdate(void);
 static void KMUpdate(void);
-static void Gimbal_Board_Update(void);
-static void Chassis_Board_Update(void);
+static void Gimbal_Target_Update(void);
+static void Chassis_Comm_Update(void);
 /**
  * @brief 检查云台模块在线状态
  */
@@ -84,6 +84,7 @@ void Robot_Init(void)
 
     Gimbal_Init();
     Shoot_Init();
+    Can_Comm_Init();
 }
 
 /* ==================== 机器人状态更新 ==================== */
@@ -100,50 +101,57 @@ void Robot_Update(void)
     shoot_online = IsShootModuleOnline();
     // 设置默认状态
     robot_cmd.robot_state = ROBOT_RUNNING;
-    robot_cmd.gimbal_mode = GIMBAL_RUNNING_FOLLOW;
-    robot_cmd.chassis_mode = CHASSIS_RUNNING_FOLLOW;
-    robot_cmd.shoot_mode = SHOOT_READY_NOFRIC;
-    robot_cmd.Speed_Up_flag = false;
     // 遥控器离线 -> 紧急停止
     if (!remote_online)
     {
         robot_cmd.robot_state = ROBOT_STOP;
-        return;
+        robot_cmd.gimbal_mode = GIMBAL_STOP;
+        robot_cmd.chassis_mode = CHASSIS_STOP;
+        robot_cmd.shoot_mode = SHOOT_STOP;
+        robot_cmd.Speed_Up_flag = false;
     }
 
-    // 模块离线 -> 对应模块停止
-    if (!gimbal_online)
-        robot_cmd.gimbal_mode = GIMBAL_STOP;
-    if (!shoot_online)
-        robot_cmd.shoot_mode = SHOOT_STOP;
-    if(!chassis_online)
-        robot_cmd.chassis_mode = CHASSIS_STOP;
-    // 根据输入模式更新
-    switch (DR16_instance.control_data.input_mode)
+    if (robot_cmd.robot_state != ROBOT_STOP)
     {
-    case REMOTE_INPUT:
-        robot_cmd.Control_mode = CONTROL_REMOTE;
-        RCUpdate();
-        break;
-    case KEY_MOUSE_INPUT:
-        robot_cmd.Control_mode = CONTROL_KEY_MOUSE;
-        KMUpdate();
-        break;
-    default:
-        robot_cmd.robot_state = ROBOT_STOP;
-        break;
-    }
-    // 停止状态下关闭所有模块
-    if (robot_cmd.robot_state == ROBOT_STOP)
-    {
-        robot_cmd.gimbal_mode = GIMBAL_STOP;
-        robot_cmd.chassis_mode = CHASSIS_STOP;
-        robot_cmd.shoot_mode = SHOOT_STOP;
-        return;
+        // 模块离线 -> 对应模块停止
+        if (!gimbal_online)
+            robot_cmd.gimbal_mode = GIMBAL_STOP;
+        if (!shoot_online)
+            robot_cmd.shoot_mode = SHOOT_STOP;
+        if(!chassis_online)
+            robot_cmd.chassis_mode = CHASSIS_STOP;
+
+        // 根据输入模式更新
+        switch (DR16_instance.control_data.input_mode)
+        {
+        case REMOTE_INPUT:
+            robot_cmd.Control_mode = CONTROL_REMOTE;
+            RCUpdate();
+            break;
+        case KEY_MOUSE_INPUT:
+            robot_cmd.Control_mode = CONTROL_KEY_MOUSE;
+            KMUpdate();
+            break;
+        default:
+            robot_cmd.robot_state = ROBOT_STOP;
+            robot_cmd.gimbal_mode = GIMBAL_STOP;
+            robot_cmd.chassis_mode = CHASSIS_STOP;
+            robot_cmd.shoot_mode = SHOOT_STOP;
+            robot_cmd.Speed_Up_flag = false;
+            break;
+        }
+
+        // 输入映射后再次施加模块离线约束，避免模式函数覆盖停机状态
+        if (!gimbal_online)
+            robot_cmd.gimbal_mode = GIMBAL_STOP;
+        if (!shoot_online)
+            robot_cmd.shoot_mode = SHOOT_STOP;
+        if (!chassis_online)
+            robot_cmd.chassis_mode = CHASSIS_STOP;
     }    
-    // 更新板间数据
-    Gimbal_Board_Update();
-    Chassis_Board_Update();
+    // 更新云台目标与下板通信
+    Gimbal_Target_Update();
+    Chassis_Comm_Update();
 }
 
 
@@ -202,49 +210,61 @@ static void KMUpdate(void)
     // 静态变量保存toggle状态
     static uint8_t fric_toggle = 0;
 
+    // 每帧先回到基础态，再叠加按键覆盖，避免模式残留
+    robot_cmd.gimbal_mode = GIMBAL_RUNNING_FOLLOW;
+    robot_cmd.chassis_mode = CHASSIS_RUNNING_FOLLOW;
+    robot_cmd.shoot_mode = fric_toggle ? SHOOT_READY : SHOOT_READY_NOFRIC;
+    robot_cmd.Mid_mode = MID_FRONT;
+    robot_cmd.Speed_Up_flag = false;
+    robot_cmd.rotate_speed = 0.0f;
+
     // Ctrl+R: 系统复位
-    if (DR16_instance.control_data.key_count[KEY_PRESS_WITH_CTRL][key_R] % 2 )
+    if (DR16_instance.control_data.keys.bits.Ctrl &&
+        DR16_instance.control_data.keys.bits.R &&
+        !DR16_instance.control_data.last_keys.bits.R)
     {
         NVIC_SystemReset();
     }
     // Ctrl+G: 底盘解限切换
-    if ( DR16_instance.control_data.keys.bits.Ctrl &&DR16_instance.control_data.keys.bits.G && DR16_instance.control_data.key_count[KEY_PRESS_WITH_CTRL][key_G] % 2)
+    if (DR16_instance.control_data.keys.bits.Ctrl &&
+        DR16_instance.control_data.keys.bits.G &&
+        !DR16_instance.control_data.last_keys.bits.G)
     {
         robot_cmd.Unlimit_flag ^= 1U;
     }
 
     // B: 摩擦轮切换
-    if ( DR16_instance.control_data.keys.bits.B && DR16_instance.control_data.key_count[KEY_PRESS][key_B] & 2)
+    if (DR16_instance.control_data.keys.bits.B && !DR16_instance.control_data.last_keys.bits.B)
     {
         fric_toggle ^= 1U;
     }
-
-    // 默认: 跟随模式
-    robot_cmd.gimbal_mode = GIMBAL_RUNNING_FOLLOW;
-    robot_cmd.chassis_mode = robot_cmd.Unlimit_flag ? CHASSIS_RUNNING_UNLIMIT : CHASSIS_RUNNING_FOLLOW;
-    robot_cmd.shoot_mode = fric_toggle ? SHOOT_READY_NOFRIC : SHOOT_READY;
-
     // Shift: 加速
     robot_cmd.Speed_Up_flag = DR16_instance.control_data.keys.bits.Shift ? true : false;
 
     // F: 一键掉头 (Yaw+180度)
-
-    if (DR16_instance.control_data.keys.bits.F && DR16_instance.control_data.key_count[KEY_PRESS][key_F] % 2)
+    if (DR16_instance.control_data.keys.bits.F && !DR16_instance.control_data.last_keys.bits.F)
     {
-        robot_cmd.Mid_mode = MID_NONE;  // 触发就近归中
-        robot_cmd.gimbal_mode = GIMBAL_MIDDLE;
+        robot_cmd.gimbal_mode = GIMBAL_RUNNING_FOLLOW;  // 切换到跟随模式以执行归中
+        robot_cmd.chassis_mode = CHASSIS_RUNNING_FOLLOW;
+        robot_cmd.Mid_mode = MID_NONE;  // 就近跟随
+        if(imu_online)
+        {
+            robot_cmd.Gyro_Yaw += 180.0f;  // 增加180度
+        }
+        else
+        {
+            robot_cmd.Mech_Yaw += 4096;    // 编码器值增加半圈
+        }
     }
-
     // E按住: 底盘分离模式
     if (DR16_instance.control_data.keys.bits.E && DR16_instance.control_data.last_keys.bits.E)
     {
         robot_cmd.gimbal_mode = GIMBAL_RUNNING_NORMAL;
-        robot_cmd.chassis_mode = robot_cmd.Unlimit_flag ? CHASSIS_RUNNING_UNLIMIT : CHASSIS_RUNNING_NORMAL;
+        robot_cmd.chassis_mode = CHASSIS_RUNNING_NORMAL;
     }
-
-    // Q按住: 小陀螺模式
     if (DR16_instance.control_data.keys.bits.Q && DR16_instance.control_data.last_keys.bits.Q)
-    {
+    {    // Q按住: 小陀螺模式
+        robot_cmd.gimbal_mode = GIMBAL_RUNNING_NORMAL;
         robot_cmd.chassis_mode = CHASSIS_RUNNING_SPIN;
     }
 
@@ -254,13 +274,11 @@ static void KMUpdate(void)
         if (VisionCanAutoAim())
         {// 视觉自瞄模式
             robot_cmd.gimbal_mode = GIMBAL_RUNNING_AIM;
-            robot_cmd.chassis_mode = CHASSIS_RUNNING_NORMAL;
             robot_cmd.shoot_mode = SHOOT_AIM;
         }
         else
         {//视觉数据不可信离线降级到跟随模式
             robot_cmd.gimbal_mode = GIMBAL_RUNNING_FOLLOW;
-            robot_cmd.chassis_mode = CHASSIS_RUNNING_FOLLOW;
             robot_cmd.shoot_mode = SHOOT_READY;
         }
     }
@@ -272,11 +290,14 @@ static void KMUpdate(void)
             robot_cmd.shoot_mode = SHOOT_FIRE;
         }
     }
+
 }
-/* ==================== 云台板数据更新 ==================== */
-static void Gimbal_Board_Update(void)
+/* ==================== 云台目标更新 ==================== */
+static void Gimbal_Target_Update(void)
 {
     float yaw_delta = 0.0f, pitch_delta = 0.0f;
+    uint8_t use_mech_ref = 0U;
+
     if (robot_cmd.gimbal_mode == GIMBAL_RUNNING_AIM && imu_online)
     {// 视觉自瞄模式 - 直接使用视觉数据计算目标角度，IMU在线时使用陀螺仪角度进行增量控制
         float vision_yaw = MiniPC_instance.receive_data.data.Ref_yaw;
@@ -299,22 +320,27 @@ static void Gimbal_Board_Update(void)
         yaw_delta = DR16_instance.control_data.Postion_x * MOUSE_YAW_SENSITIVITY;
         pitch_delta = -DR16_instance.control_data.Postion_y * MOUSE_PITCH_SENSITIVITY;
     }
-    // IMU在线优先使用陀螺仪角度进行控制，离线时退回机械角
-    if (imu_online)
+    // NORMAL模式必须使用机械角闭环；FOLLOW/AIM模式在IMU在线时使用陀螺仪参考
+    use_mech_ref = (robot_cmd.gimbal_mode == GIMBAL_RUNNING_NORMAL || !imu_online) ? 1U : 0U;
+
+    if (!use_mech_ref)
     {
-        robot_cmd.Mech_Yaw += (int32_t)(yaw_delta * MECH_YAW_SENSITIVITY);
-        robot_cmd.Mech_Pitch += (uint16_t)pitch_delta * MECH_PITCH_SENSITIVITY;
+        robot_cmd.Gyro_Yaw += yaw_delta;
+        robot_cmd.Gyro_Pitch += pitch_delta;
         return;
     }
     
-    robot_cmd.Gyro_Yaw += yaw_delta;
-    robot_cmd.Gyro_Pitch += pitch_delta;
+    robot_cmd.Mech_Yaw += (int32_t)(yaw_delta * MECH_YAW_SENSITIVITY);
+    robot_cmd.Mech_Pitch = (uint16_t)limit(
+        (float)((int32_t)robot_cmd.Mech_Pitch + (int32_t)(pitch_delta * MECH_PITCH_SENSITIVITY)),
+        (float)MCH_UP_limit,
+        (float)MCH_DOWN_limit);
 }
 
 /**
- * @brief 底盘板数据更新 - 根据当前命令计算底盘速度并发送
+ * @brief 下板通信更新 - 根据当前命令计算底盘速度并发送状态包
  */
-static void Chassis_Board_Update(void)
+static void Chassis_Comm_Update(void)
 {
     if (can_comm_instance.can_comm_online_flag == 0)
         return;
@@ -325,7 +351,7 @@ static void Chassis_Board_Update(void)
     Gimabl_To_Chassis_Action.Move_Status = (uint8_t)robot_cmd.chassis_mode;
     Gimabl_To_Chassis_Action.Shoot_Mode = (uint8_t)robot_cmd.shoot_mode;
     Gimabl_To_Chassis_Action.Break_Limitation = Gimbal_To_Chassis.Unlimit_flag;
-    Gimbal_To_Chassis.Unlimit_flag = (robot_cmd.chassis_mode == CHASSIS_RUNNING_UNLIMIT) ? 1U : 0U;
+    Gimbal_To_Chassis.Unlimit_flag = (robot_cmd.Unlimit_flag ? 1U : 0U);
 
     if (robot_cmd.robot_state == ROBOT_STOP)
     {

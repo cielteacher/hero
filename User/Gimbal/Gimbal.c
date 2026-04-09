@@ -96,13 +96,11 @@ static PID Pitch_Speed_PID[4] = {
 
 /* ==================== 内部函数声明 ==================== */
 static void Gimbal_Stop(void);
-static void Motor_Control(GimbalPidMode_e pid_mode, uint8_t imu_online);
 static void Pitch_Limit(uint8_t imu_online);
 static void Chassis_Follow_Calc(void);
 static int32_t Gimbal_CenterAlign(int32_t yaw_now);
 static void GetFeedbackData(uint8_t imu_online, float *yaw_fdb, float *pitch_fdb,
-                             float *yaw_rate, float *pitch_rate, float *yaw_ref, float *pitch_ref);
-
+                            float *yaw_rate, float *pitch_rate, float *yaw_ref, float *pitch_ref);
 /* VisionCanAutoAim() 由 Gimbal_Cmd.c 定义 */
 extern uint8_t VisionCanAutoAim(void);
 /* ==================== 云台初始化 ==================== */
@@ -155,46 +153,77 @@ void Gimbal_Init(void)
  */
 void Gimbal_Control(void)
 {
-    // 根据反馈源统一处理限位
-    Pitch_Limit(imu_online);
-    // 根据模式选择PID参数并控制电机
     int16_t can_send[4] = {0};
+    float yaw_fdb = 0.0f;
+    float pitch_fdb = 0.0f;
+    float yaw_rate = 0.0f;
+    float pitch_rate = 0.0f;
+    float yaw_ref = 0.0f;
+    float pitch_ref = 0.0f;
+
     switch (robot_cmd.gimbal_mode)
     {
     case GIMBAL_STOP:
         Gimbal_Stop();
         return;
-    case GIMBAL_MIDDLE:
-        // 归中模式: 直接设置目标角度为归中位置, 使用专门的PID参数快速收敛(机械反馈)
-        // ===== Yaw轴双环 =====
-        // 位置环: 将角度误差转换为速度指令
-        
-        PID_Control_Smis(gimbal.yaw_motor->Data.DJI_data.MechanicalAngle, Yaw_Mid_Front, &Yaw_Pos_PID[PID_CENTER], gimbal.yaw_motor->Data.DJI_data.SpeedFilter);
-        // 速度环: 跟随模式时叠加前馈补偿
-        PID_Control(gimbal.yaw_motor->Data.DJI_data.SpeedFilter, Yaw_Pos_PID[PID_CENTER].pid_out, &Yaw_Speed_PID[PID_CENTER]);
-        // ===== Pitch轴双环 =====
-        // 位置环: 将角度误差转换为速度指令
-        PID_Control_Smis(gimbal.pitch_motor->Data.DJI_data.MechanicalAngle, Pitch_Mid, &Pitch_Pos_PID[PID_CENTER], gimbal.pitch_motor->Data.DJI_data.SpeedFilter);
-        // 速度环: 从速度误差转换电机电流
-        PID_Control(gimbal.pitch_motor->Data.DJI_data.SpeedFilter, Pitch_Pos_PID[PID_CENTER].pid_out, &Pitch_Speed_PID[PID_CENTER]);
-        // ===== 发送CAN电机指令 =====
-        can_send[0] = (int16_t)Pitch_Speed_PID[PID_CENTER].pid_out;
-        can_send[1] = (int16_t)Yaw_Speed_PID[PID_CENTER].pid_out;
-        DM_Motor_DJI_CAN_TxMessage(gimbal.yaw_motor, can_send);
-        return;
     case GIMBAL_RUNNING_FOLLOW:
         // 底盘跟随模式: 计算底盘旋转以保持云台居中
         Chassis_Follow_Calc();
+        Pitch_Limit(imu_online);
+        GetFeedbackData(imu_online, &yaw_fdb, &pitch_fdb, &yaw_rate, &pitch_rate, &yaw_ref, &pitch_ref);
+
+        if (imu_online)
+        {
+            FeedForward_Calc(&GimbalYaw_FF, robot_cmd.rotate_feedforward);
+        }
+
+        PID_Control_Smis(yaw_fdb, yaw_ref, &Yaw_Pos_PID[PID_GYRO], yaw_rate);
+        PID_Control(yaw_rate, Yaw_Pos_PID[PID_GYRO].pid_out + (imu_online ? (Chassis_Rotate_PIDS.pid_out + GimbalYaw_FF.Out) : 0.0f), &Yaw_Speed_PID[PID_GYRO]);
+
+        PID_Control_Smis(pitch_fdb, pitch_ref, &Pitch_Pos_PID[PID_GYRO], pitch_rate);
+        PID_Control(pitch_rate, Pitch_Pos_PID[PID_GYRO].pid_out, &Pitch_Speed_PID[PID_GYRO]);
+
+        can_send[0] = (int16_t)Pitch_Speed_PID[PID_GYRO].pid_out;
+        can_send[1] = (int16_t)Yaw_Speed_PID[PID_GYRO].pid_out;
+        DM_Motor_DJI_CAN_TxMessage(gimbal.yaw_motor, can_send);
+        return;
+
     case GIMBAL_RUNNING_NORMAL:
-        // 底盘分离模式: 直接使用PID控制云台角度 (根据IMU在线状态选择反馈源)
-        // 两种模式共用电机控制，IMU在线时使用陀螺仪角度控制，离线时降级使用机械角度控制
-        Motor_Control(PID_GYRO, imu_online);
-        break;
+        // 底盘分离模式: 始终使用机械角闭环
+        Pitch_Limit(0U);
+        GetFeedbackData(0U, &yaw_fdb, &pitch_fdb, &yaw_rate, &pitch_rate, &yaw_ref, &pitch_ref);
+
+        PID_Control_Smis(yaw_fdb, yaw_ref, &Yaw_Pos_PID[PID_MECH], yaw_rate);
+        PID_Control(yaw_rate, Yaw_Pos_PID[PID_MECH].pid_out, &Yaw_Speed_PID[PID_MECH]);
+
+        PID_Control_Smis(pitch_fdb, pitch_ref, &Pitch_Pos_PID[PID_MECH], pitch_rate);
+        PID_Control(pitch_rate, Pitch_Pos_PID[PID_MECH].pid_out, &Pitch_Speed_PID[PID_MECH]);
+
+        can_send[0] = (int16_t)Pitch_Speed_PID[PID_MECH].pid_out;
+        can_send[1] = (int16_t)Yaw_Speed_PID[PID_MECH].pid_out;
+        DM_Motor_DJI_CAN_TxMessage(gimbal.yaw_motor, can_send);
+        return;
 
     case GIMBAL_RUNNING_AIM:
-        // 自瞄模式: 有目标用AIM参数, 无目标降级用GYRO
-        Motor_Control( PID_AIM,imu_online);
-        break;
+        // 自瞄模式: 视觉在线时使用陀螺仪闭环, 否则退回机械角
+        Pitch_Limit(imu_online);
+        GetFeedbackData(imu_online, &yaw_fdb, &pitch_fdb, &yaw_rate, &pitch_rate, &yaw_ref, &pitch_ref);
+
+        if (imu_online)
+        {
+            FeedForward_Calc(&GimbalYaw_FF, robot_cmd.rotate_feedforward);
+        }
+
+        PID_Control_Smis(yaw_fdb, yaw_ref, &Yaw_Pos_PID[PID_AIM], yaw_rate);
+        PID_Control(yaw_rate, Yaw_Pos_PID[PID_AIM].pid_out + (imu_online ? (Chassis_Rotate_PIDS.pid_out + GimbalYaw_FF.Out) : 0.0f), &Yaw_Speed_PID[PID_AIM]);
+
+        PID_Control_Smis(pitch_fdb, pitch_ref, &Pitch_Pos_PID[PID_AIM], pitch_rate);
+        PID_Control(pitch_rate, Pitch_Pos_PID[PID_AIM].pid_out, &Pitch_Speed_PID[PID_AIM]);
+
+        can_send[0] = (int16_t)Pitch_Speed_PID[PID_AIM].pid_out;
+        can_send[1] = (int16_t)Yaw_Speed_PID[PID_AIM].pid_out;
+        DM_Motor_DJI_CAN_TxMessage(gimbal.yaw_motor, can_send);
+        return;
     default:
         // 未知模式: 停止
         Gimbal_Stop();
@@ -335,7 +364,6 @@ static void Pitch_Limit(uint8_t imu_online)
                                                 (float)MCH_UP_limit, (float)MCH_DOWN_limit);
     }
 }
-
 /* ==================== 底盘跟随计算 ==================== */
 /**
  * @brief 底盘跟随控制 - 计算底盘应旋转的速度
@@ -392,79 +420,6 @@ static void GetFeedbackData(uint8_t imu_online, float *yaw_fdb, float *pitch_fdb
         *yaw_ref = robot_cmd.Gyro_Yaw;
         *pitch_ref = robot_cmd.Gyro_Pitch;
     }
-}
-
-/* ==================== 电机统一控制 ==================== */
-/**
- * @brief 云台电机双环PID控制 (统一实现)
- *
- * 控制架构:
- * ┌────────────────────────────────────────┐
- * │ 位置环错误 → 位置环PID                  │
- * │ (输出速度指令)                         │
- * ├────────────────────────────────────────┤
- * │ 速度环错误 → 速度环PID                  │
- * │ (输出电机电流)                         │
- * ├────────────────────────────────────────┤
- * │ 跟随模式: 添加底盘旋转前馈补偿         │
- * └────────────────────────────────────────┘
- *
- * 统一接口优势:
- * - 所有反馈源类型使用同一入口 (FB_GYRO/FB_MECH)
- * - 无论反馈类型，双环结构一致
- * - 前馈补偿统一应用
- *
- * @param pid_mode PID参数集索引 (PID_GYRO, PID_MECH, PID_AIM, PID_CENTER)
- * @param fb_src   反馈源类型 (FB_GYRO: IMU反馈, FB_MECH: 编码器反馈)
- *
- * 执行流程:
- * 1. 调用GetFeedbackData()获取反馈数据
- * 2. 计算小陀螺前馈 (若使用陀螺仪反馈)
- * 3. Yaw轴双环:
- *    - 位置环: 从角度误差计算所需速度
- *    - 速度环: 从速度误差转换电机电流
- *    - 跟随模式添加前馈
- * 4. Pitch轴双环 (结构相同)
- * 5. 通过CAN发送电机指令
- */
-static void Motor_Control(GimbalPidMode_e pid_mode, uint8_t  imu_online)
-{
-
-    float yaw_fdb, pitch_fdb, yaw_rate, pitch_rate, yaw_ref, pitch_ref;
-
-    // 统一获取反馈数据 (消除分支)
-    GetFeedbackData(imu_online, &yaw_fdb, &pitch_fdb, &yaw_rate, &pitch_rate, &yaw_ref, &pitch_ref);
-
-    // 计算小陀螺前馈补偿 (仅陀螺仪反馈时)
-    // 补偿底盘旋转对云台的影响
-    if (imu_online == 1)
-    {
-        FeedForward_Calc(&GimbalYaw_FF, robot_cmd.rotate_feedforward);
-    }
-
-    // ===== Yaw轴双环 =====
-    // 位置环: 将角度误差转换为速度指令
-    PID_Control_Smis(yaw_fdb, yaw_ref, &Yaw_Pos_PID[pid_mode], yaw_rate);
-
-    // 速度环: 跟随模式时叠加前馈补偿
-    float yaw_speed_ref = Yaw_Pos_PID[pid_mode].pid_out;
-    if (imu_online == 1 && robot_cmd.gimbal_mode == GIMBAL_RUNNING_FOLLOW)
-    {
-        // 前馈: 直接使用底盘旋转指令+云台补偿
-        yaw_speed_ref = Chassis_Rotate_PIDS.pid_out + GimbalYaw_FF.Out;
-    }
-    PID_Control(yaw_rate, yaw_speed_ref, &Yaw_Speed_PID[pid_mode]);
-
-    // ===== Pitch轴双环 =====
-    // 位置环: 将角度误差转换为速度指令
-    PID_Control_Smis(pitch_fdb, pitch_ref, &Pitch_Pos_PID[pid_mode], pitch_rate);
-    // 速度环: 从速度误差转换电机电流
-    PID_Control(pitch_rate, Pitch_Pos_PID[pid_mode].pid_out, &Pitch_Speed_PID[pid_mode]);
-
-    // ===== 发送CAN电机指令 =====
-    can_send[0] = (int16_t)Pitch_Speed_PID[pid_mode].pid_out;
-    can_send[1] = (int16_t)Yaw_Speed_PID[pid_mode].pid_out;
-    DM_Motor_DJI_CAN_TxMessage(gimbal.yaw_motor, can_send);
 }
 /* ==================== 小陀螺速度设置 ==================== */
 /**
