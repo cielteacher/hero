@@ -24,6 +24,14 @@
 Gimbal_t gimbal = {0};
 extern Robot_ctrl_cmd_t robot_cmd;
 extern uint8_t imu_online;
+
+#define POWERON_CENTER_STABLE_TICKS      200U
+#define POWERON_CENTER_YAW_ERR_THRESHOLD 120.0f
+#define POWERON_CENTER_PITCH_ERR_THRESHOLD 80.0f
+
+uint8_t power_on_center_flag = 0U;
+static uint16_t gimbal_poweron_center_stable_cnt = 0U;
+
 /* ==================== PID模式定义 ==================== */
 /**
  * @brief PID参数组索引
@@ -98,7 +106,8 @@ static PID Pitch_Speed_PID[4] = {
 static void Gimbal_Stop(void);
 static void Pitch_Limit(uint8_t imu_online);
 static void Chassis_Follow_Calc(void);
-static int32_t Gimbal_CenterAlign(int32_t yaw_now);
+static int32_t gimbal_center(int32_t yaw_now);
+static int32_t front_center_target(int32_t yaw_now);
 static void GetFeedbackData(uint8_t imu_online, float *yaw_fdb, float *pitch_fdb,
                             float *yaw_rate, float *pitch_rate, float *yaw_ref, float *pitch_ref);
 /* VisionCanAutoAim() 由 Gimbal_Cmd.c 定义 */
@@ -138,18 +147,13 @@ void Gimbal_Init(void)
     robot_cmd.Mech_Pitch = gimbal.pitch_motor->Data.DJI_data.MechanicalAngle;
     robot_cmd.Gyro_Yaw = INS_Info.Yaw_TolAngle;
     robot_cmd.Gyro_Pitch = INS_Info.Pitch_Angle;
+
+    power_on_center_flag = 0U;
+    gimbal_poweron_center_stable_cnt = 0U;
 }
 /* ==================== 云台主控制函数 ==================== */
 /**
  * @brief 云台控制主函数 - 1ms周期调用
- * @note  控制流程:
- *        1. 停止模式 → 电机停转，同步参考角度
- *        2. 获取已决策的反馈源 (由Cmd层根据IMU状态决定)
- *        3. 应用限位 (根据反馈源统一处理)
- *        4. IMU离线降级 (所有模式 → 机械角)
- *        5. 选择PID参数 (根据模式)
- *        6. 执行统一的电机控制
- *
  */
 void Gimbal_Control(void)
 {
@@ -160,70 +164,135 @@ void Gimbal_Control(void)
     float pitch_rate = 0.0f;
     float yaw_ref = 0.0f;
     float pitch_ref = 0.0f;
+    uint8_t use_gyro_feedback = imu_online ? 1U : 0U;
+    GimbalPidMode_e pid_mode = use_gyro_feedback ? PID_GYRO : PID_MECH;
 
     switch (robot_cmd.gimbal_mode)
     {
     case GIMBAL_STOP:
         Gimbal_Stop();
         return;
-    case GIMBAL_RUNNING_FOLLOW:
-        // 底盘跟随模式: 计算底盘旋转以保持云台居中
-        Chassis_Follow_Calc();
-        Pitch_Limit(imu_online);
-        GetFeedbackData(imu_online, &yaw_fdb, &pitch_fdb, &yaw_rate, &pitch_rate, &yaw_ref, &pitch_ref);
+    default:
+        break;
+    }
 
-        if (imu_online)
+    if (power_on_center_flag == 0U)
+    {
+        // 上电归中强制走机械角反馈和机械PID参数
+        robot_cmd.Mech_Yaw = front_center_target(gimbal.yaw_motor->Data.DJI_data.Continuous_Mechanical_angle);
+        robot_cmd.Mech_Pitch = (uint16_t)limit((float)gimbal.pitch_motor->Data.DJI_data.MechanicalAngle,
+                                               (float)MCH_UP_limit, (float)MCH_DOWN_limit);
+
+        Pitch_Limit(0U);
+        GetFeedbackData(0U, &yaw_fdb, &pitch_fdb, &yaw_rate, &pitch_rate, &yaw_ref, &pitch_ref);
+
+        PID_Control_Smis(yaw_fdb, yaw_ref, &Yaw_Pos_PID[PID_CENTER], yaw_rate);
+        PID_Control(yaw_rate, Yaw_Pos_PID[PID_CENTER].pid_out, &Yaw_Speed_PID[PID_CENTER]);
+
+        PID_Control_Smis(pitch_fdb, pitch_ref, &Pitch_Pos_PID[PID_CENTER], pitch_rate);
+        PID_Control(pitch_rate, Pitch_Pos_PID[PID_CENTER].pid_out, &Pitch_Speed_PID[PID_CENTER]);
+
+        can_send[0] = (int16_t)Pitch_Speed_PID[PID_CENTER].pid_out;
+        can_send[1] = (int16_t)Yaw_Speed_PID[PID_CENTER].pid_out;
+        DM_Motor_DJI_CAN_TxMessage(gimbal.yaw_motor, can_send);
+
+        if ((fabsf(yaw_ref - yaw_fdb) < POWERON_CENTER_YAW_ERR_THRESHOLD) &&
+            (fabsf(pitch_ref - pitch_fdb) < POWERON_CENTER_PITCH_ERR_THRESHOLD))
+        {
+            gimbal_poweron_center_stable_cnt++;
+        }
+        else
+        {
+            gimbal_poweron_center_stable_cnt = 0U;
+        }
+
+        if (gimbal_poweron_center_stable_cnt >= POWERON_CENTER_STABLE_TICKS)
+        {
+            power_on_center_flag = 1U;
+            gimbal_poweron_center_stable_cnt = 0U;
+
+            // 归中完成后同步参考，避免切回陀螺仪闭环时跳变
+            robot_cmd.Mech_Yaw = gimbal.yaw_motor->Data.DJI_data.Continuous_Mechanical_angle;
+            robot_cmd.Mech_Pitch = gimbal.pitch_motor->Data.DJI_data.MechanicalAngle;
+            robot_cmd.Gyro_Yaw = INS_Info.Yaw_TolAngle;
+            robot_cmd.Gyro_Pitch = INS_Info.Pitch_Angle;
+        }
+        return;
+    }
+
+    switch (robot_cmd.gimbal_mode)
+    {
+    case GIMBAL_RUNNING_FOLLOW:
+    {
+        float yaw_speed_ref = 0.0f;
+
+        Chassis_Follow_Calc();
+        Pitch_Limit(use_gyro_feedback);
+        GetFeedbackData(use_gyro_feedback, &yaw_fdb, &pitch_fdb, &yaw_rate, &pitch_rate, &yaw_ref, &pitch_ref);
+
+        if (use_gyro_feedback)
         {
             FeedForward_Calc(&GimbalYaw_FF, robot_cmd.rotate_feedforward);
         }
 
-        PID_Control_Smis(yaw_fdb, yaw_ref, &Yaw_Pos_PID[PID_GYRO], yaw_rate);
-        PID_Control(yaw_rate, Yaw_Pos_PID[PID_GYRO].pid_out + (imu_online ? (Chassis_Rotate_PIDS.pid_out + GimbalYaw_FF.Out) : 0.0f), &Yaw_Speed_PID[PID_GYRO]);
+        PID_Control_Smis(yaw_fdb, yaw_ref, &Yaw_Pos_PID[pid_mode], yaw_rate);
+        yaw_speed_ref = Yaw_Pos_PID[pid_mode].pid_out;
+        if (use_gyro_feedback)
+        {
+            yaw_speed_ref += GimbalYaw_FF.Out;
+        }
+        PID_Control(yaw_rate, yaw_speed_ref, &Yaw_Speed_PID[pid_mode]);
 
-        PID_Control_Smis(pitch_fdb, pitch_ref, &Pitch_Pos_PID[PID_GYRO], pitch_rate);
-        PID_Control(pitch_rate, Pitch_Pos_PID[PID_GYRO].pid_out, &Pitch_Speed_PID[PID_GYRO]);
+        PID_Control_Smis(pitch_fdb, pitch_ref, &Pitch_Pos_PID[pid_mode], pitch_rate);
+        PID_Control(pitch_rate, Pitch_Pos_PID[pid_mode].pid_out, &Pitch_Speed_PID[pid_mode]);
 
-        can_send[0] = (int16_t)Pitch_Speed_PID[PID_GYRO].pid_out;
-        can_send[1] = (int16_t)Yaw_Speed_PID[PID_GYRO].pid_out;
+        can_send[0] = (int16_t)Pitch_Speed_PID[pid_mode].pid_out;
+        can_send[1] = (int16_t)Yaw_Speed_PID[pid_mode].pid_out;
         DM_Motor_DJI_CAN_TxMessage(gimbal.yaw_motor, can_send);
         return;
+    }
 
     case GIMBAL_RUNNING_NORMAL:
-        // 底盘分离模式: 始终使用机械角闭环
-        Pitch_Limit(0U);
-        GetFeedbackData(0U, &yaw_fdb, &pitch_fdb, &yaw_rate, &pitch_rate, &yaw_ref, &pitch_ref);
+        Pitch_Limit(use_gyro_feedback);
+        GetFeedbackData(use_gyro_feedback, &yaw_fdb, &pitch_fdb, &yaw_rate, &pitch_rate, &yaw_ref, &pitch_ref);
 
-        PID_Control_Smis(yaw_fdb, yaw_ref, &Yaw_Pos_PID[PID_MECH], yaw_rate);
-        PID_Control(yaw_rate, Yaw_Pos_PID[PID_MECH].pid_out, &Yaw_Speed_PID[PID_MECH]);
+        PID_Control_Smis(yaw_fdb, yaw_ref, &Yaw_Pos_PID[pid_mode], yaw_rate);
+        PID_Control(yaw_rate, Yaw_Pos_PID[pid_mode].pid_out, &Yaw_Speed_PID[pid_mode]);
 
-        PID_Control_Smis(pitch_fdb, pitch_ref, &Pitch_Pos_PID[PID_MECH], pitch_rate);
-        PID_Control(pitch_rate, Pitch_Pos_PID[PID_MECH].pid_out, &Pitch_Speed_PID[PID_MECH]);
+        PID_Control_Smis(pitch_fdb, pitch_ref, &Pitch_Pos_PID[pid_mode], pitch_rate);
+        PID_Control(pitch_rate, Pitch_Pos_PID[pid_mode].pid_out, &Pitch_Speed_PID[pid_mode]);
 
-        can_send[0] = (int16_t)Pitch_Speed_PID[PID_MECH].pid_out;
-        can_send[1] = (int16_t)Yaw_Speed_PID[PID_MECH].pid_out;
+        can_send[0] = (int16_t)Pitch_Speed_PID[pid_mode].pid_out;
+        can_send[1] = (int16_t)Yaw_Speed_PID[pid_mode].pid_out;
         DM_Motor_DJI_CAN_TxMessage(gimbal.yaw_motor, can_send);
         return;
 
     case GIMBAL_RUNNING_AIM:
-        // 自瞄模式: 视觉在线时使用陀螺仪闭环, 否则退回机械角
-        Pitch_Limit(imu_online);
-        GetFeedbackData(imu_online, &yaw_fdb, &pitch_fdb, &yaw_rate, &pitch_rate, &yaw_ref, &pitch_ref);
+    {
+        float yaw_speed_ref = 0.0f;
 
-        if (imu_online)
+        Pitch_Limit(use_gyro_feedback);
+        GetFeedbackData(use_gyro_feedback, &yaw_fdb, &pitch_fdb, &yaw_rate, &pitch_rate, &yaw_ref, &pitch_ref);
+
+        if (use_gyro_feedback)
         {
+            robot_cmd.rotate_feedforward = can_comm_instance.can_comm_rx_data.chassis_gyro / 200.0f;
             FeedForward_Calc(&GimbalYaw_FF, robot_cmd.rotate_feedforward);
         }
 
-        PID_Control_Smis(yaw_fdb, yaw_ref, &Yaw_Pos_PID[PID_AIM], yaw_rate);
-        PID_Control(yaw_rate, Yaw_Pos_PID[PID_AIM].pid_out + (imu_online ? (Chassis_Rotate_PIDS.pid_out + GimbalYaw_FF.Out) : 0.0f), &Yaw_Speed_PID[PID_AIM]);
+        PID_Control_Smis(yaw_fdb, yaw_ref, &Yaw_Pos_PID[pid_mode], yaw_rate);
+        yaw_speed_ref = Yaw_Pos_PID[pid_mode].pid_out + (use_gyro_feedback ? GimbalYaw_FF.Out : 0.0f);
+        PID_Control(yaw_rate, yaw_speed_ref, &Yaw_Speed_PID[pid_mode]);
 
-        PID_Control_Smis(pitch_fdb, pitch_ref, &Pitch_Pos_PID[PID_AIM], pitch_rate);
-        PID_Control(pitch_rate, Pitch_Pos_PID[PID_AIM].pid_out, &Pitch_Speed_PID[PID_AIM]);
+        PID_Control_Smis(pitch_fdb, pitch_ref, &Pitch_Pos_PID[pid_mode], pitch_rate);
+        PID_Control(pitch_rate, Pitch_Pos_PID[pid_mode].pid_out, &Pitch_Speed_PID[pid_mode]);
 
-        can_send[0] = (int16_t)Pitch_Speed_PID[PID_AIM].pid_out;
-        can_send[1] = (int16_t)Yaw_Speed_PID[PID_AIM].pid_out;
+        can_send[0] = (int16_t)Pitch_Speed_PID[pid_mode].pid_out;
+        can_send[1] = (int16_t)Yaw_Speed_PID[pid_mode].pid_out;
         DM_Motor_DJI_CAN_TxMessage(gimbal.yaw_motor, can_send);
         return;
+    }
+
     default:
         // 未知模式: 停止
         Gimbal_Stop();
@@ -287,52 +356,70 @@ static void Gimbal_Stop(void)
  * │ 5. 返回: 当前位置 + 最小距离      │
  * └───────────────────────────────────┘
  */
-static int32_t Gimbal_CenterAlign(int32_t yaw_now)
+static int32_t gimbal_center(int32_t yaw_now)
 {
     // 情景1: 固定归中方位 - 前方
     if (robot_cmd.Mid_mode == MID_FRONT)
     {
         // 计算当前圈数索引
-        int32_t round_base = (yaw_now / 8192) * 8192;
+        int32_t current_turn_base = (yaw_now / 8192) * 8192;
         // 返回同圈内的目标
-        return round_base + Yaw_Mid_Front;
+        return current_turn_base + Yaw_Mid_Front;
     }
 
     // 情景2: 固定归中方位 - 后方
     if (robot_cmd.Mid_mode == MID_BACK)
     {
-        int32_t round_base = (yaw_now / 8192) * 8192;
-        return round_base + Yaw_Mid_Back;
+        int32_t current_turn_base = (yaw_now / 8192) * 8192;
+        return current_turn_base + Yaw_Mid_Back;
     }
 
     // 情景3: 最近方位归中算法
     // 连续角度转换为单圈表示 [0, 8191]
-    const uint16_t mids[4] = {Yaw_Mid_Front, Yaw_Mid_Left, Yaw_Mid_Back, Yaw_Mid_Right};
-    uint16_t yaw_single = (uint16_t)((yaw_now % 8192 + 8192) % 8192);
+    const uint16_t alignment_targets[4] = {Yaw_Mid_Front, Yaw_Mid_Left, Yaw_Mid_Back, Yaw_Mid_Right};
+    uint16_t yaw_in_turn = (uint16_t)((yaw_now % 8192 + 8192) % 8192);
 
     // 寻找最近的基本方位
-    int16_t best_dist = 8192;
+    int16_t best_offset = 8192;
 
     for (uint8_t i = 0; i < 4; i++)
     {
         // 计算原始距离
-        int16_t dist = (int16_t)mids[i] - (int16_t)yaw_single;
+        int16_t candidate_offset = (int16_t)alignment_targets[i] - (int16_t)yaw_in_turn;
 
         // 处理跨越: 若距离>180°, 走反向
-        if (dist > 4096)
-            dist -= 8192;  // 太远往前, 改走回头
-        if (dist < -4096)
-            dist += 8192;  // 太远往后, 改走向前
+        if (candidate_offset > 4096)
+            candidate_offset -= 8192;  // 太远往前, 改走回头
+        if (candidate_offset < -4096)
+            candidate_offset += 8192;  // 太远往后, 改走向前
 
         // 记录最近距离
-        if (abs(dist) < abs(best_dist))
+        if (abs(candidate_offset) < abs(best_offset))
         {
-            best_dist = dist;
+            best_offset = candidate_offset;
         }
     }
 
     // 返回目标连续角度 (当前位置+最短距离)
-    return yaw_now + best_dist;
+    return yaw_now + best_offset;
+}
+
+static int32_t front_center_target(int32_t yaw_now)
+{
+    int32_t yaw_in_turn = (yaw_now % 8192 + 8192) % 8192;
+    int32_t target = yaw_now - yaw_in_turn + Yaw_Mid_Front;
+    int32_t offset = target - yaw_now;
+
+    if (offset > 4096)
+    {
+        target -= 8192;
+    }
+    else if (offset < -4096)
+    {
+        target += 8192;
+    }
+
+    return target;
 }
 
 /* ==================== Pitch轴限位 ==================== */
@@ -373,7 +460,7 @@ static void Pitch_Limit(uint8_t imu_online)
 static void Chassis_Follow_Calc(void)
 {
     int32_t yaw_now = gimbal.yaw_motor->Data.DJI_data.Continuous_Mechanical_angle;
-    int32_t target = Gimbal_CenterAlign(yaw_now);
+    int32_t target = gimbal_center(yaw_now);
     
     // 获取底盘陀螺仪反馈 (用于前馈补偿)
     robot_cmd.rotate_feedforward = can_comm_instance.can_comm_rx_data.chassis_gyro / 200.0f;
@@ -420,40 +507,4 @@ static void GetFeedbackData(uint8_t imu_online, float *yaw_fdb, float *pitch_fdb
         *yaw_ref = robot_cmd.Gyro_Yaw;
         *pitch_ref = robot_cmd.Gyro_Pitch;
     }
-}
-/* ==================== 小陀螺速度设置 ==================== */
-/**
- * @brief 小陀螺旋转速度设置 (按Yaw角度变速)
- * @note  根据装甲板朝向动态调整转速
- *        装甲板正对敌方时加速，对角时减速
- *        目的是减少被击中概率
- */
-static void Rotate_Speed_Set(void)
-{
-    // 获取Yaw单圈角度 [0, 8191]
-    float yaw_single = fmodf((float)gimbal.yaw_motor->Data.DJI_data.Continuous_Mechanical_angle, 8192.0f);
-    if (yaw_single < 0.0f) yaw_single += 8192.0f;
-
-    // 四个装甲板扇区中心 (每扇区约2048编码器值)
-    const float sector_centers[] = {865.0f, 2755.0f, 4805.0f, 6855.0f, 8036.0f};
-    const float sector_bounds[][2] = {
-        {0.0f, 1730.0f}, {1730.0f, 3780.0f}, {3780.0f, 5830.0f}, 
-        {5830.0f, 7880.0f}, {7880.0f, 8191.0f}
-    };
-
-    // 计算角度比例因子 (距扇区中心的偏移)
-    float angle_ratio = 0.0f;
-    for (uint8_t i = 0; i < 5; i++)
-    {
-        if (yaw_single >= sector_bounds[i][0] && yaw_single <= sector_bounds[i][1])
-        {
-            angle_ratio = fabsf(sector_centers[i] - yaw_single) / 2050.57f;
-            break;
-        }
-    }
-
-    // 变速公式: 基础转速 + 余弦调制
-    // 扇区中心(角度比0) -> cos(0)=1 -> 最大附加速度
-    // 扇区边缘(角度比1) -> cos(π)=-1 -> 最小附加速度
-    robot_cmd.rotate_speed = 700.0f * PI + 800.0f * PI * arm_cos_f32(angle_ratio * PI);
 }

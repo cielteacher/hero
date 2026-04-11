@@ -31,6 +31,8 @@
 /* USER CODE BEGIN Includes */
 #include "BMI088driver.h"
 #include "bsp_dwt.h"
+#include "SEGGER_RTT.h"
+#include <stdio.h>
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -59,6 +61,7 @@ void MX_FREERTOS_Init(void);
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
+
 /* USER CODE END 0 */
 
 /**
@@ -99,6 +102,9 @@ int main(void)
   /* Initialize all configured peripherals */
   MX_GPIO_Init();
   MX_DMA_Init();
+  
+
+  
   MX_FDCAN1_Init();
   MX_FDCAN2_Init();
   MX_FDCAN3_Init();
@@ -108,10 +114,13 @@ int main(void)
   MX_SPI6_Init();
   MX_CORDIC_Init();
   /* USER CODE BEGIN 2 */
+  
   // 在tim2的更新里面更新dwt定时周期
   HAL_Delay(10);
+  SEGGER_RTT_Init(); // 初始化SEGGER RTT
   DWT_Init(480); // 初始化dwt时钟
 	MX_USB_DEVICE_Init();// USB设备初始化
+  
   /* USER CODE END 2 */
 
   /* Init scheduler */

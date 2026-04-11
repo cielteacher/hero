@@ -180,7 +180,7 @@ void HAL_UART_ErrorCallback(UART_HandleTypeDef *huart)
             __HAL_UART_CLEAR_FEFLAG(huart);
             __HAL_UART_CLEAR_NEFLAG(huart);
             __HAL_UART_CLEAR_OREFLAG(huart);
-            // ✅ 新增：清除DMA1 Stream4 传输错误标志（你的DMA通道）
+            //  清除DMA1 Stream4 传输错误标志（你的DMA通道）
       		__HAL_DMA_CLEAR_FLAG(huart->hdmarx, DMA_FLAG_FEIF0_4);
       		__HAL_DMA_CLEAR_FLAG(huart->hdmarx, DMA_FLAG_FEIF0_4);
             // 3. 重置UART状态 + 重启DMA接收

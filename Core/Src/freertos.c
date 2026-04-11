@@ -26,7 +26,7 @@
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
 
-#include "SEGGER_SYSVIEW.h"
+
 
 /* USER CODE END Includes */
 

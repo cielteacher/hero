@@ -38,6 +38,7 @@ file(GLOB SOURCES
 "${CMAKE_SOURCE_DIR}/User/device/vofa+/*.c" 
 "${CMAKE_SOURCE_DIR}/User/device/remote_control/*.c"
 "${CMAKE_SOURCE_DIR}/User/Algorithm/*.c" 
+"${CMAKE_SOURCE_DIR}/User/Algorithm/*.cpp" 
 "${CMAKE_SOURCE_DIR}/User/Task/*.c"
 "${CMAKE_SOURCE_DIR}/User/Gimbal/*.c"
 "${CMAKE_SOURCE_DIR}/User/Shoot/*.c"
@@ -47,7 +48,7 @@ file(GLOB SOURCES
 
 target_sources(${CMAKE_PROJECT_NAME} PRIVATE ${SOURCES})
 
-# 头文件路径（完全不变）
+# 头文件路径
 target_include_directories(${CMAKE_PROJECT_NAME} PRIVATE
     SystemView/SEGGER
     SystemView/Config

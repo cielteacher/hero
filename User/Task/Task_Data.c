@@ -12,12 +12,12 @@
 #include "bsp_pwm.h"
 #include "Quaternion.h"
 #include "bsp_dwt.h"
-
+#include "SEGGER_RTT.h"
 //目前数据更新任务全部加着临界区
 void Task_Alive(void *pvParameters)
 {
   for (;;)
-  {//
+  {
     FDCAN_Restart();
     DM_Motor_AliveCheck();
     DJI_Motor_AliveCheck();
@@ -26,7 +26,11 @@ void Task_Alive(void *pvParameters)
     DR16_AliveCheck();
     MiniPC_AliveCheck();
     Can_Comm_AliveCheck();
-    vTaskDelay(1);
+    
+  SEGGER_RTT_Write(0, &INS_Info.Pitch_Angle, sizeof(float));
+  SEGGER_RTT_Write(0, &INS_Info.Yaw_Angle, sizeof(float));
+  SEGGER_RTT_Write(0, &INS_Info.Roll_Angle, sizeof(float));
+    vTaskDelay(5);
   }
 }
 

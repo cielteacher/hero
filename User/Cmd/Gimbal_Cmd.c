@@ -21,11 +21,14 @@ static uint8_t chassis_online = 0;
 static uint8_t gimbal_online = 0;
 static uint8_t shoot_online = 0;
 uint8_t imu_online = 0;
+extern uint8_t power_on_center_flag;
 /* ==================== 内部函数声明 ==================== */
 static void RCUpdate(void);
 static void KMUpdate(void);
 static void Gimbal_Target_Update(void);
 static void Chassis_Comm_Update(void);
+static void Rotate_Speed_Set(void);
+static uint8_t IsShootModeLockedByShoot(void);
 /**
  * @brief 检查云台模块在线状态
  */
@@ -55,6 +58,12 @@ static uint8_t VisionCanAutoAim(void)
 {
     return (MiniPC_instance.MiniPC_Online_Flag &&
             MiniPC_instance.receive_data.data.dis <= 0.2f) ? 1 : 0;
+}
+
+static uint8_t IsShootModeLockedByShoot(void)
+{
+    return (robot_cmd.shoot_mode == SHOOT_STUCKING ||
+            robot_cmd.shoot_mode == SHOOT_COOLING) ? 1U : 0U;
 }
 /* ==================== 机器人初始化 ==================== */
 void Robot_Init(void)
@@ -149,8 +158,11 @@ void Robot_Update(void)
         if (!chassis_online)
             robot_cmd.chassis_mode = CHASSIS_STOP;
     }    
-    // 更新云台目标与下板通信
-    Gimbal_Target_Update();
+    // 仅运行态更新云台目标，停止态由执行层同步参考角
+    if (robot_cmd.robot_state != ROBOT_STOP)
+    {
+        Gimbal_Target_Update();
+    }
     Chassis_Comm_Update();
 }
 
@@ -166,25 +178,36 @@ void Robot_Update(void)
  */
 static void RCUpdate(void)
 {
+    uint8_t shoot_locked = IsShootModeLockedByShoot();
+
     // 默认: 底盘跟随云台
     robot_cmd.gimbal_mode = GIMBAL_RUNNING_FOLLOW;
     robot_cmd.chassis_mode = CHASSIS_RUNNING_FOLLOW;
-    robot_cmd.shoot_mode = SHOOT_READY_NOFRIC;
+    if (!shoot_locked)
+    {
+        robot_cmd.shoot_mode = SHOOT_READY_NOFRIC;
+    }
 
     // fn1按住: 启动摩擦轮
     if (DR16_instance.control_data.fn_1)
     {
-        robot_cmd.shoot_mode = SHOOT_READY;
+        if (!shoot_locked)
+        {
+            robot_cmd.shoot_mode = SHOOT_READY;
+        }
 
         // fn1+fn2: 自瞄模式
         if (DR16_instance.control_data.fn_2)
         {
             robot_cmd.gimbal_mode = GIMBAL_RUNNING_AIM;
             robot_cmd.chassis_mode = CHASSIS_RUNNING_NORMAL;
-            robot_cmd.shoot_mode = VisionCanAutoAim() ? SHOOT_AIM : SHOOT_READY;
+            if (!shoot_locked)
+            {
+                robot_cmd.shoot_mode = VisionCanAutoAim() ? SHOOT_AIM : SHOOT_READY;
+            }
         }
         // fn1+trigger: 手动开火
-        if (DR16_instance.control_data.trigger)
+        if (DR16_instance.control_data.trigger && !shoot_locked)
         {
             robot_cmd.shoot_mode = SHOOT_FIRE;
         }
@@ -204,16 +227,21 @@ static void RCUpdate(void)
  *        右键长按 = 自瞄
  *        左键点击 = 开火（必须开启摩擦轮）
  *        Shift  = 加速
+ *        V按下  = 云太归中（就近选择）
  */
 static void KMUpdate(void)
 {
     // 静态变量保存toggle状态
     static uint8_t fric_toggle = 0;
+    uint8_t shoot_locked = IsShootModeLockedByShoot();
 
     // 每帧先回到基础态，再叠加按键覆盖，避免模式残留
     robot_cmd.gimbal_mode = GIMBAL_RUNNING_FOLLOW;
     robot_cmd.chassis_mode = CHASSIS_RUNNING_FOLLOW;
-    robot_cmd.shoot_mode = fric_toggle ? SHOOT_READY : SHOOT_READY_NOFRIC;
+    if (!shoot_locked)
+    {
+        robot_cmd.shoot_mode = fric_toggle ? SHOOT_READY : SHOOT_READY_NOFRIC;
+    }
     robot_cmd.Mid_mode = MID_FRONT;
     robot_cmd.Speed_Up_flag = false;
     robot_cmd.rotate_speed = 0.0f;
@@ -241,6 +269,11 @@ static void KMUpdate(void)
     // Shift: 加速
     robot_cmd.Speed_Up_flag = DR16_instance.control_data.keys.bits.Shift ? true : false;
 
+    if(DR16_instance.control_data.keys.bits.V && !DR16_instance.control_data.last_keys.bits.V)
+    {
+        power_on_center_flag = 0u;
+
+    }
     // F: 一键掉头 (Yaw+180度)
     if (DR16_instance.control_data.keys.bits.F && !DR16_instance.control_data.last_keys.bits.F)
     {
@@ -274,16 +307,22 @@ static void KMUpdate(void)
         if (VisionCanAutoAim())
         {// 视觉自瞄模式
             robot_cmd.gimbal_mode = GIMBAL_RUNNING_AIM;
-            robot_cmd.shoot_mode = SHOOT_AIM;
+            if (!shoot_locked)
+            {
+                robot_cmd.shoot_mode = SHOOT_AIM;
+            }
         }
         else
         {//视觉数据不可信离线降级到跟随模式
             robot_cmd.gimbal_mode = GIMBAL_RUNNING_FOLLOW;
-            robot_cmd.shoot_mode = SHOOT_READY;
+            if (!shoot_locked)
+            {
+                robot_cmd.shoot_mode = SHOOT_READY;
+            }
         }
     }
     // 左键点击: 手动开火
-    if (DR16_instance.control_data.press_l && !DR16_instance.control_data.last_mouse_press_l)
+    if (DR16_instance.control_data.press_l && !DR16_instance.control_data.last_mouse_press_l && !shoot_locked)
     {
         if (fric_toggle)
         {
@@ -320,8 +359,8 @@ static void Gimbal_Target_Update(void)
         yaw_delta = DR16_instance.control_data.Postion_x * MOUSE_YAW_SENSITIVITY;
         pitch_delta = -DR16_instance.control_data.Postion_y * MOUSE_PITCH_SENSITIVITY;
     }
-    // NORMAL模式必须使用机械角闭环；FOLLOW/AIM模式在IMU在线时使用陀螺仪参考
-    use_mech_ref = (robot_cmd.gimbal_mode == GIMBAL_RUNNING_NORMAL || !imu_online) ? 1U : 0U;
+    // 统一策略: IMU在线时全模式更新陀螺仪参考, IMU离线才更新机械参考
+    use_mech_ref = !imu_online ? 1U : 0U;
 
     if (!use_mech_ref)
     {
@@ -337,6 +376,46 @@ static void Gimbal_Target_Update(void)
         (float)MCH_DOWN_limit);
 }
 
+/* ==================== 小陀螺速度设置 ==================== */
+/**
+ * @brief 小陀螺旋转速度设置 (按Yaw角度变速)
+ * @note  根据装甲板朝向动态调整转速
+ *        装甲板正对敌方时加速，对角时减速
+ *        目的是减少被击中概率
+ */
+static void Rotate_Speed_Set(void)
+{
+    // 获取Yaw单圈角度 [0, 8191]
+    float yaw_single = fmodf((float)gimbal.yaw_motor->Data.DJI_data.Continuous_Mechanical_angle, 8192.0f);
+    if (yaw_single < 0.0f)
+        yaw_single += 8192.0f;
+
+    // 四个装甲板扇区中心 (每扇区约2048编码器值)
+    const float sector_centers[] = {865.0f, 2755.0f, 4805.0f, 6855.0f, 8036.0f};
+
+    // 取与最近装甲板中心的最短圆周距离，避免扇区边界突变
+    float min_offset = 8192.0f;
+    for (uint8_t i = 0; i < 5; i++)
+    {
+        float offset = fabsf(sector_centers[i] - yaw_single);
+        if (offset > 4096.0f)
+        {
+            offset = 8192.0f - offset;
+        }
+        if (offset < min_offset)
+        {
+            min_offset = offset;
+        }
+    }
+    float angle_ratio = min_offset / 2050.57f;
+
+    // 变速公式: 基础转速 + 余弦调制
+    // 扇区中心(角度比0) -> cos(0)=1 -> 最大附加速度
+    // 扇区边缘(角度比1) -> cos(π)=-1 -> 最小附加速度
+    float target_speed = 700.0f * PI + 800.0f * PI * arm_cos_f32(angle_ratio * PI);
+    robot_cmd.rotate_speed = limit(target_speed, (float)rotate_speed_MAX, -(float)rotate_speed_MAX);
+}
+
 /**
  * @brief 下板通信更新 - 根据当前命令计算底盘速度并发送状态包
  */
@@ -350,7 +429,6 @@ static void Chassis_Comm_Update(void)
     Gimabl_To_Chassis_Action.Vision_Online = MiniPC_instance.MiniPC_Online_Flag;
     Gimabl_To_Chassis_Action.Move_Status = (uint8_t)robot_cmd.chassis_mode;
     Gimabl_To_Chassis_Action.Shoot_Mode = (uint8_t)robot_cmd.shoot_mode;
-    Gimabl_To_Chassis_Action.Break_Limitation = Gimbal_To_Chassis.Unlimit_flag;
     Gimbal_To_Chassis.Unlimit_flag = (robot_cmd.Unlimit_flag ? 1U : 0U);
 
     if (robot_cmd.robot_state == ROBOT_STOP)
@@ -397,7 +475,12 @@ static void Chassis_Comm_Update(void)
         // 小陀螺模式增加旋转速度和线速度限制
         if (robot_cmd.chassis_mode == CHASSIS_RUNNING_SPIN)
         {
-            planningV.Omega = robot_cmd.rotate_speed / (float)rotate_speed_MAX;
+            // 键鼠Q小陀螺模式使用角度变速；遥控器拨轮输入保持手动转速
+            if (robot_cmd.Control_mode == CONTROL_KEY_MOUSE)
+            {
+                Rotate_Speed_Set();
+            }
+            planningV.Omega = limit(robot_cmd.rotate_speed / (float)rotate_speed_MAX, 1.0f, -1.0f);
             planningV.X *= 1.4f;
             planningV.Y *= 1.4f;
         }
@@ -417,6 +500,9 @@ static void Chassis_Comm_Update(void)
         Gimbal_To_Chassis.vy = (int16_t)((slopeningV.Y * sin_theta + slopeningV.X * cos_theta) * 750.0f);
         Gimbal_To_Chassis.rotate = (int16_t)(slopeningV.Omega * 2000.0f);
     }
+
+    // 与本周期生效的下发标志保持一致，避免状态包滞后一拍
+    Gimabl_To_Chassis_Action.Break_Limitation = Gimbal_To_Chassis.Unlimit_flag;
 
     // 发送CAN数据给底盘
     CAN_Send(can_comm_instance.can_comm, (uint8_t *)&Gimbal_To_Chassis, 10.0f);
