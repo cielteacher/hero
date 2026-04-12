@@ -14,7 +14,7 @@
     return (int) ((x-offset)*((float)((1<<bits)-1))/span);
 }
 /**
- * @brief 角度差值计算，结果在[0, 8192)范围内
+ * @brief 角度就近值计算，结果在[0, 8192)范围内
  * @param target_angle 目标角度
  * @param angle_now 当前角度
  */

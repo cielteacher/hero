@@ -18,10 +18,9 @@
 Gimbal_t gimbal = {0};
 extern Robot_ctrl_cmd_t robot_cmd;
 
-#define POWERON_CENTER_STABLE_TICKS       200U
-#define POWERON_CENTER_YAW_ERR_THRESHOLD  120.0f
-#define POWERON_CENTER_PITCH_ERR_THRESHOLD 80.0f
-#define GIMBAL_STOP_PID_MODE              PID_GYRO
+#define CENTER_STABLE_TICKS       200U
+#define CENTER_YAW_DEADBAND  0.1f
+#define CENTER_PITCH_DEADBAND 0.1f
 #define GIMBAL_STOP_SPEED_DEADBAND        2.0f
 #define GIMBAL_STOP_OUT_MAX               14000.0f
 
@@ -80,24 +79,16 @@ static PID Pitch_Speed_PID[4] = {
 /* ==================== 内部函数声明 ==================== */
 static void Gimbal_Disable(void);
 static void Gimbal_Stop(void);
-static void ResetAllGimbalPidIout(void);
-static void SyncGimbalReference(void);
-static void Pitch_LimitGyro(void);
-static int32_t front_center_target(int32_t yaw_now);
+static void ResetGimbalPidIout(void);
+static void Pitch_Limit(void);
 
-static void SyncGimbalReference(void)
+
+/* ==================== Pitch 限位 ==================== */
+static void Pitch_Limit(void)
 {
-    if (gimbal.yaw_motor != NULL && gimbal.pitch_motor != NULL)
-    {
-        robot_cmd.Mech_Yaw = gimbal.yaw_motor->Data.DJI_data.Continuous_Mechanical_angle;
-        robot_cmd.Mech_Pitch = gimbal.pitch_motor->Data.DJI_data.MechanicalAngle;
-    }
-
-    robot_cmd.Gyro_Yaw = INS_Info.Yaw_TolAngle;
-    robot_cmd.Gyro_Pitch = INS_Info.Pitch_Angle;
+    robot_cmd.Gyro_Position_Pitch = limit( robot_cmd.Gyro_Position_Pitch, IMU_UP_limit, IMU_DOWN_limit);
 }
-
-static void ResetAllGimbalPidIout(void)
+static void ResetGimbalPidIout(void)
 {
     for (uint8_t i = 0; i <= PID_AIM; i++)
     {
@@ -134,29 +125,20 @@ void Gimbal_Init(void)
     gimbal.yaw_motor = DM_Motor_Init(&yaw_dm4310);
 
     robot_cmd.gimbal_mode = GIMBAL_STOP;
-    SyncGimbalReference();
-
-    power_on_center_flag = 0U;
-    gimbal_poweron_center_stable_cnt = 0U;
+    power_on_center_flag = 0U;// 上电归中标志位，置位后才允许正常控制逻辑
+    gimbal_poweron_center_stable_cnt = 0U;// 上电归中稳定计数器，连续满足条件达到一定次数后认为归中完成
 }
 
 /* ==================== 云台主控制函数 ==================== */
 void Gimbal_Control(void)
 {
     int16_t can_send[4] = {0};
-    float yaw_fdb = 0.0f;
-    float pitch_fdb = 0.0f;
-    float yaw_rate = 0.0f;
-    float pitch_rate = 0.0f;
-    float yaw_speed_ref = 0.0f;
-    const GimbalPidMode_e pid_mode = PID_GYRO;
-
     if (gimbal.yaw_motor == NULL || gimbal.pitch_motor == NULL)
     {
         return;
     }
 
-    /* 阶段1: 停止/失能状态提前处理 */
+    /* 停止/失能状态提前处理 */
     switch (robot_cmd.gimbal_mode)
     {
     case GIMBAL_DISABLED:
@@ -169,31 +151,22 @@ void Gimbal_Control(void)
         break;
     }
 
-    /* 阶段2: 上电归中（强制机械反馈 + CENTER 参数） */
+    /* 上电归中（强制机械反馈 + CENTER 参数） */
     if (power_on_center_flag == 0U)
     {
-        robot_cmd.Mech_Yaw = front_center_target(gimbal.yaw_motor->Data.DJI_data.Continuous_Mechanical_angle);
-        robot_cmd.Mech_Pitch = (uint16_t)limit((float)gimbal.pitch_motor->Data.DJI_data.MechanicalAngle,
-                                               (float)MCH_UP_limit,
-                                               (float)MCH_DOWN_limit);
+        uint16_t target_yaw = QuickCentering(gimbal.yaw_motor->Data.DJI_data.Continuous_Mechanical_angle,Yaw_Mid_Front );
+        PID_Control_Smis(gimbal.yaw_motor->Data.DJI_data.MechanicalAngle, (float)target_yaw, &Yaw_Pos_PID[PID_CENTER], gimbal.yaw_motor->Data.DJI_data.SpeedFilter);
+        PID_Control(gimbal.yaw_motor->Data.DJI_data.SpeedFilter, Yaw_Pos_PID[PID_CENTER].pid_out, &Yaw_Speed_PID[PID_CENTER]);
 
-        yaw_fdb = (float)gimbal.yaw_motor->Data.DJI_data.Continuous_Mechanical_angle;
-        pitch_fdb = (float)gimbal.pitch_motor->Data.DJI_data.MechanicalAngle;
-        yaw_rate = gimbal.yaw_motor->Data.DJI_data.SpeedFilter;
-        pitch_rate = gimbal.pitch_motor->Data.DJI_data.SpeedFilter;
-
-        PID_Control_Smis(yaw_fdb, (float)robot_cmd.Mech_Yaw, &Yaw_Pos_PID[PID_CENTER], yaw_rate);
-        PID_Control(yaw_rate, Yaw_Pos_PID[PID_CENTER].pid_out, &Yaw_Speed_PID[PID_CENTER]);
-
-        PID_Control_Smis(pitch_fdb, (float)robot_cmd.Mech_Pitch, &Pitch_Pos_PID[PID_CENTER], pitch_rate);
-        PID_Control(pitch_rate, Pitch_Pos_PID[PID_CENTER].pid_out, &Pitch_Speed_PID[PID_CENTER]);
+        PID_Control_Smis(gimbal.pitch_motor->Data.DJI_data.MechanicalAngle, (float)Pitch_Mid, &Pitch_Pos_PID[PID_CENTER], gimbal.pitch_motor->Data.DJI_data.SpeedFilter);
+        PID_Control(gimbal.pitch_motor->Data.DJI_data.SpeedFilter, Pitch_Pos_PID[PID_CENTER].pid_out, &Pitch_Speed_PID[PID_CENTER]);
 
         can_send[0] = (int16_t)Pitch_Speed_PID[PID_CENTER].pid_out;
         can_send[1] = (int16_t)Yaw_Speed_PID[PID_CENTER].pid_out;
         DM_Motor_DJI_CAN_TxMessage(gimbal.yaw_motor, can_send);
 
-        if ((fabsf((float)robot_cmd.Mech_Yaw - yaw_fdb) < POWERON_CENTER_YAW_ERR_THRESHOLD) &&
-            (fabsf((float)robot_cmd.Mech_Pitch - pitch_fdb) < POWERON_CENTER_PITCH_ERR_THRESHOLD))
+        if ((fabsf(Yaw_Pos_PID[PID_CENTER].error_last) < CENTER_YAW_DEADBAND) &&
+            (fabsf(Pitch_Pos_PID[PID_CENTER].error_last) < CENTER_PITCH_DEADBAND))
         {
             gimbal_poweron_center_stable_cnt++;
         }
@@ -202,11 +175,13 @@ void Gimbal_Control(void)
             gimbal_poweron_center_stable_cnt = 0U;
         }
 
-        if (gimbal_poweron_center_stable_cnt >= POWERON_CENTER_STABLE_TICKS)
+        if (gimbal_poweron_center_stable_cnt >= CENTER_STABLE_TICKS)
         {
             power_on_center_flag = 1U;
             gimbal_poweron_center_stable_cnt = 0U;
-            SyncGimbalReference();
+            // 上电归中完成，允许进入正常控制逻辑,更新位置数据，防止突变
+            robot_cmd.Gyro_Position_Yaw = INS_Info.Yaw_TolAngle;
+            robot_cmd.Gyro_Position_Pitch = INS_Info.Pitch_Angle;
         }
 
         return;
@@ -309,29 +284,9 @@ static void Gimbal_Stop(void)
     SyncGimbalReference();
 }
 
-static int32_t front_center_target(int32_t yaw_now)
-{
-    int32_t yaw_in_turn = (yaw_now % 8192 + 8192) % 8192;
-    int32_t target = yaw_now - yaw_in_turn + Yaw_Mid_Front;
-    int32_t offset = target - yaw_now;
 
-    if (offset > 4096)
-    {
-        target -= 8192;
-    }
-    else if (offset < -4096)
-    {
-        target += 8192;
-    }
 
-    return target;
-}
 
-/* ==================== Pitch 限位 ==================== */
-static void Pitch_LimitGyro(void)
-{
-    robot_cmd.Gyro_Pitch = limit(robot_cmd.Gyro_Pitch, IMU_UP_limit, IMU_DOWN_limit);
-}
 
 
 

@@ -3,6 +3,7 @@
  * @brief   云台决策层 - 模式决策、目标更新、板间通信
  */
 #include "Gimbal_Cmd.h"
+#include "Gimbal.h"
 #include "PID.h"
 #include "arm_math.h"
 #include "bsp_fdcan.h"
@@ -13,12 +14,9 @@
 
 /* ==================== 全局/静态变量 ==================== */
 Robot_ctrl_cmd_t robot_cmd = {0};
-static Gimbal_board_send_t Gimbal_To_Chassis;
-static Gimbal_action_t Gimabl_To_Chassis_Action;
-static Slope_s slope_X, slope_Y, slope_Omega;
-static CANInstance *can_comm2;
-extern uint8_t power_on_center_flag;
-
+static CANInstance *can_comm2; // 底盘数据发送id120的数据包
+extern uint8_t power_on_center_flag; // gimbal.c中定义的云台上电归中标志0标志要进行上电归中！
+static Slope_s slope_X, slope_Y, slope_Omega; // 底盘速度规划
 /* 跟随模式底盘旋转PID参数（位置环+速度环） */
 static PID_Smis Chassis_Rotate_PIDS = {
     .Kp = 1.0f,
@@ -149,7 +147,7 @@ void Robot_Update(void)
         robot_cmd.shoot_mode = SHOOT_DISABLED;
         if(can_comm_instance.can_comm_online_flag)
         {
-            Chassis_Comm_Update( 0U, 0U);
+            Chassis_Comm_Update();
         }
         return;
     }
@@ -184,7 +182,6 @@ static void RCUpdate(void)
 {
     robot_cmd.gimbal_mode = GIMBAL_RUNNING;
     robot_cmd.chassis_mode = CHASSIS_RUNNING_FOLLOW;
-    robot_cmd.Mid_mode = MID_FRONT;
     robot_cmd.Speed_Up_flag = false;
     robot_cmd.shoot_mode = SHOOT_READY_NOFRIC;
 
@@ -231,7 +228,7 @@ static void KMUpdate(void)
 
     robot_cmd.gimbal_mode = GIMBAL_RUNNING;
     robot_cmd.chassis_mode = CHASSIS_RUNNING_FOLLOW;
-    robot_cmd.Mid_mode = MID_FRONT;
+    robot_cmd.Mid_mode = MID_FRONT; //默认前方归中，除非按下F键就近归中
     robot_cmd.shoot_mode = fric_toggle ? SHOOT_READY : SHOOT_READY_NOFRIC;
     // Ctrl+R组合键触发系统复位（
     if (DR16_instance.control_data.keys.bits.Ctrl && DR16_instance.control_data.keys.bits.R &&
@@ -262,6 +259,7 @@ static void KMUpdate(void)
     if (DR16_instance.control_data.keys.bits.E)
     {
         robot_cmd.chassis_mode = CHASSIS_RUNNING_NORMAL;
+        robot_cmd.Mid_mode = MID_NONE;// 取消跟随后就近归中
     }
     // 长按鼠标右键开启自瞄
     if (DR16_instance.control_data.long_press_r)
@@ -376,9 +374,10 @@ static void Gimbal_Target_Update(void)
 }
 
 /* ==================== 小陀螺速度设置 ==================== */
+// 根据云台离装甲板的位置变速，离得近快
 static void Rotate_Speed_Set(void)
 {
-    const float sector_centers[] = {865.0f, 2755.0f, 4805.0f, 6855.0f, 8036.0f};
+    const float sector_centers[] = {Yaw_Mid_Front, Yaw_Mid_Back, Yaw_Mid_Left, Yaw_Mid_Right};
     float yaw_single;
     float min_offset = 8192.0f;
 
@@ -394,7 +393,7 @@ static void Rotate_Speed_Set(void)
         yaw_single += 8192.0f;
     }
 
-    for (uint8_t i = 0; i < 5U; i++)
+    for (uint8_t i = 0; i < 4; i++)
     {
         float offset = fabsf(sector_centers[i] - yaw_single);
         if (offset > 4096.0f)
@@ -406,7 +405,6 @@ static void Rotate_Speed_Set(void)
             min_offset = offset;
         }
     }
-
     {
         float angle_ratio = min_offset / 2050.57f;
         float target_speed = 700.0f * PI + 800.0f * PI * arm_cos_f32(angle_ratio * PI);
@@ -417,22 +415,27 @@ static void Rotate_Speed_Set(void)
 /* ==================== 跟随模式旋转速度设置 ==================== */
 static void Follow_Rotate_Speed_Update(void)
 {
+    if(gimbal.yaw_motor == NULL)
+    {
+        robot_cmd.rotate_speed = 0.0f;
+        return;
+    }
     const int32_t follow_centers[2] = {Yaw_Mid_Front, Yaw_Mid_Back };
     int32_t target_single = Yaw_Mid_Front;
     /* MID_NONE: 方向就近归中 */
     if (robot_cmd.Mid_mode == MID_NONE)
     {
-        int32_t min_abs_err = 8192;
+        int32_t min_abs_err = MAX_EC_VALUE;
         for (uint8_t i = 0U; i < 2U; i++)
         {
             int32_t err = follow_centers[i] - gimbal.yaw_motor->Data.DJI_data.MechanicalAngle;
             if (err > 4096)
             {
-                err -= 8192;
+                err -= MAX_EC_VALUE;
             }
             else if (err < -4096)
             {
-                err += 8192;
+                err += MAX_EC_VALUE;
             }
             int32_t abs_err = (err >= 0) ? err : -err;
             if (abs_err < min_abs_err)
@@ -453,7 +456,7 @@ static void Follow_Rotate_Speed_Update(void)
     // 进行一次快速归中，防止南辕北辙跳转
     target_single = QuickCentering(gimbal.yaw_motor->Data.DJI_data.MechanicalAngle, target_single);
     
-    PID_Control_Smis((float)target_single, (float)gimbal.yaw_motor->Data.DJI_data.MechanicalAngle, &Chassis_Rotate_PIDS, gimbal.yaw_motor->Data.DJI_data.SpeedFilter);
+    PID_Control_Smis((float)gimbal.yaw_motor->Data.DJI_data.MechanicalAngle, (float)target_single, &Chassis_Rotate_PIDS, gimbal.yaw_motor->Data.DJI_data.SpeedFilter);
 
     /* 跟随关系里机械角与底盘旋转通常为反号 */
     robot_cmd.rotate_speed = -PID_Control(gimbal.yaw_motor->Data.DJI_data.SpeedFilter, Chassis_Rotate_PIDS.pid_out, &Chassis_Rotate_PID);
@@ -464,11 +467,11 @@ static void Follow_Rotate_Speed_Update(void)
 static void Chassis_Comm_Update()
 {
     static const float LEVEL_GAIN = 2.0f;// 控制时的速度增益
-    static Chassis_speed_s slopeningV = {0};
-    Chassis_speed_s planningV = {0};
-    //默认关闭
-    Gimbal_To_Chassis.Close_flag = 0U;
-    if (can_comm_instance.can_comm_online_flag == 0U || can_comm_instance.can_comm == NULL || can_comm2 == NULL)
+    Chassis_speed_s planningV = {0.0f, 0.0f, 0.0f};// 速度规划输出
+    Chassis_speed_s slopeningV = {0.0f, 0.0f, 0.0f};// 斜坡限幅输出
+    static Gimbal_board_send_t Gimbal_To_Chassis;// 每次更新前先清空发送结构体，防止未赋值项的垃圾数据干扰底盘控制
+    static Gimbal_action_t Gimabl_To_Chassis_Action;
+    if (can_comm_instance.can_comm_online_flag == 0U || can_comm_instance.can_comm == NULL || can_comm2 == NULL || gimbal.yaw_motor == NULL)
     {
         return;
     }
@@ -479,7 +482,9 @@ static void Chassis_Comm_Update()
     Gimabl_To_Chassis_Action.Move_Status = (uint8_t)robot_cmd.chassis_mode;
     Gimabl_To_Chassis_Action.Shoot_Mode = (uint8_t)robot_cmd.shoot_mode;
     Gimabl_To_Chassis_Action.Break_Limitation = robot_cmd.Unlimit_flag ? 1U : 0U;
+
     Gimbal_To_Chassis.Unlimit_flag = robot_cmd.Unlimit_flag ? 1U : 0U;
+    Gimbal_To_Chassis.Close_flag = 0U;
 
     switch (robot_cmd.chassis_mode) 
     {
@@ -492,60 +497,65 @@ static void Chassis_Comm_Update()
             Gimbal_To_Chassis.Close_flag = 1U;;
         break;
         case CHASSIS_RUNNING_FOLLOW:
-        case CHASSIS_RUNNING_NORMAL:
+            Follow_Rotate_Speed_Update();
+            if (robot_cmd.Control_mode == CONTROL_REMOTE)
+            {
+                planningV.Y = DR16_instance.control_data.Normalize_ch2 * LEVEL_GAIN * 2.0f;
+                planningV.X = DR16_instance.control_data.Normalize_ch3 * LEVEL_GAIN;
+            }
+            else
+            {
+                int32_t key_x = (DR16_instance.control_data.keys.bits.W ? 1 : 0) - (DR16_instance.control_data.keys.bits.S ? 1 : 0);
+                int32_t key_y = (DR16_instance.control_data.keys.bits.A ? 1 : 0) - (DR16_instance.control_data.keys.bits.D ? 1 : 0);
+                float speed_scale = LEVEL_GAIN + (robot_cmd.Speed_Up_flag ? 1.0f : 0.0f);
+
+                planningV.X = (float)key_x * speed_scale;
+                planningV.Y = (float)key_y * speed_scale;
+                planningV.Omega = 0.0f;
+            }
         case CHASSIS_RUNNING_SPIN:
+            Rotate_Speed_Set();
+            if (robot_cmd.Control_mode == CONTROL_REMOTE)
+            {
+                planningV.Y = DR16_instance.control_data.Normalize_ch2 * LEVEL_GAIN * 2.0f;
+                planningV.X = DR16_instance.control_data.Normalize_ch3 * LEVEL_GAIN;
+            }
+            else
+            {
+                int32_t key_x = (DR16_instance.control_data.keys.bits.W ? 1 : 0) - (DR16_instance.control_data.keys.bits.S ? 1 : 0);
+                int32_t key_y = (DR16_instance.control_data.keys.bits.A ? 1 : 0) - (DR16_instance.control_data.keys.bits.D ? 1 : 0);
+                float speed_scale = LEVEL_GAIN + (robot_cmd.Speed_Up_flag ? 1.0f : 0.0f);
+
+                planningV.X = (float)key_x * speed_scale;
+                planningV.Y = (float)key_y * speed_scale;
+                planningV.Omega = 0.0f;
+            }
+        case CHASSIS_RUNNING_NORMAL:
+            if (robot_cmd.Control_mode == CONTROL_REMOTE)
+            {
+                planningV.Y = DR16_instance.control_data.Normalize_ch2 * LEVEL_GAIN * 2.0f;
+                planningV.X = DR16_instance.control_data.Normalize_ch3 * LEVEL_GAIN;
+                if(DR16_instance.control_data.wheel)
+                {
+                    planningV.Omega = DR16_instance.control_data.wheel * rotate_speed_MAX;
+                }
+            }
+            else
+            {
+                int32_t key_x = (DR16_instance.control_data.keys.bits.W ? 1 : 0) - (DR16_instance.control_data.keys.bits.S ? 1 : 0);
+                int32_t key_y = (DR16_instance.control_data.keys.bits.A ? 1 : 0) - (DR16_instance.control_data.keys.bits.D ? 1 : 0);
+                float speed_scale = LEVEL_GAIN + (robot_cmd.Speed_Up_flag ? 1.0f : 0.0f);
+
+                planningV.X = (float)key_x * speed_scale;
+                planningV.Y = (float)key_y * speed_scale;
+                planningV.Omega = 0.0f;
+            }
             // 其他模式在后续代码中更新速度
         break;
         default:
-            break;
+        break;
 
     }
-    else
-    {
-
-
-        if (robot_cmd.Control_mode == CONTROL_REMOTE)
-        {
-            planningV.Y = DR16_instance.control_data.Normalize_ch2 * LEVEL_GAIN * 2.0f;
-            planningV.X = DR16_instance.control_data.Normalize_ch3 * LEVEL_GAIN;
-            planningV.Omega = DR16_instance.control_data.Normalize_ch1 * LEVEL_GAIN;
-
-            if (fabsf(DR16_instance.control_data.Normalize_wheel) > 0.08f)
-            {
-                robot_cmd.chassis_mode = CHASSIS_RUNNING_SPIN;
-                robot_cmd.rotate_speed = DR16_instance.control_data.Normalize_wheel * (float)rotate_speed_MAX;
-            }
-        }
-        else
-        {
-            int32_t key_x = (DR16_instance.control_data.keys.bits.W ? 1 : 0) -
-                            (DR16_instance.control_data.keys.bits.S ? 1 : 0);
-            int32_t key_y = (DR16_instance.control_data.keys.bits.A ? 1 : 0) -
-                            (DR16_instance.control_data.keys.bits.D ? 1 : 0);
-            float speed_scale = LEVEL_GAIN + (robot_cmd.Speed_Up_flag ? 1.0f : 0.0f);
-
-            planningV.X = (float)key_x * speed_scale;
-            planningV.Y = (float)key_y * speed_scale;
-            planningV.Omega = 0.0f;
-        }
-
-        if (robot_cmd.chassis_mode == CHASSIS_RUNNING_FOLLOW)
-        {
-            Follow_Rotate_Speed_Update();
-            planningV.Omega = limit(robot_cmd.rotate_speed  , (float)rotate_speed_MAX, -(float)rotate_speed_MAX);
-        }
-
-        if (robot_cmd.chassis_mode == CHASSIS_RUNNING_SPIN)
-        {
-            if (robot_cmd.Control_mode == CONTROL_KEY_MOUSE)
-            {
-                Rotate_Speed_Set();
-            }
-
-            planningV.Omega = limit(robot_cmd.rotate_speed / (float)rotate_speed_MAX, 1.0f, -1.0f);
-            planningV.X *= 1.4f;
-            planningV.Y *= 1.4f;
-        }
 
         slopeningV.X = Slope_Calc(&slope_X, planningV.X, slopeningV.X);
         slopeningV.Y = Slope_Calc(&slope_Y, planningV.Y, slopeningV.Y);
@@ -553,8 +563,7 @@ static void Chassis_Comm_Update()
 
         if (gimbal.yaw_motor != NULL)
         {
-            float chassis_offset =
-                (float)(gimbal.yaw_motor->Data.DJI_data.MechanicalAngle - Yaw_Mid_Front) / 1303.80f;
+            float chassis_offset = (float)(gimbal.yaw_motor->Data.DJI_data.MechanicalAngle - Yaw_Mid_Front) / 1303.80f;
             float sin_theta = arm_sin_f32(chassis_offset);
             float cos_theta = arm_cos_f32(chassis_offset);
 
@@ -568,7 +577,7 @@ static void Chassis_Comm_Update()
         }
 
         Gimbal_To_Chassis.rotate = (int16_t)(slopeningV.Omega * 2000.0f);
-    }
+    
 
     Gimabl_To_Chassis_Action.Break_Limitation = Gimbal_To_Chassis.Unlimit_flag;
 
