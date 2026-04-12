@@ -49,8 +49,6 @@ static void Gimbal_Target_Update(void);
 static void Chassis_Comm_Update(uint8_t gimbal_online_now, uint8_t shoot_online_now);
 static void Rotate_Speed_Set(void);
 static void Follow_Rotate_Speed_Update(uint8_t gimbal_online_now);
-static void SyncCmdReferenceToFeedback(void);
-static float SlewLimit(float target, float current, float step);
 // 检查模块在线（奇妙的检测逻辑，等有时间了在改改）
 /**
  * @brief 检查云台模块在线状态
@@ -88,7 +86,9 @@ static uint8_t CheckShootOnline(void)
         return 0U;
     }
 }
-
+/**
+ * @brief 视觉是否可以接管云台
+ */
 static uint8_t VisionCanAutoAim(void)
 {
     if(MiniPC_instance.MiniPC_Online_Flag &&MiniPC_instance.receive_data.data.dis <= 0.2f)
@@ -101,27 +101,6 @@ static uint8_t VisionCanAutoAim(void)
         return 0U;
     }
 }
-
-
-
-
-
-static float SlewLimit(float target, float current, float step)
-{
-    float delta = target - current;
-
-    if (delta > step)
-    {
-        delta = step;
-    }
-    else if (delta < -step)
-    {
-        delta = -step;
-    }
-
-    return current + delta;
-}
-
 /* ==================== 机器人初始化 ==================== */
 void Robot_Init(void)
 {
@@ -353,37 +332,31 @@ static void Gimbal_Target_Update(void)
             {
                 if(robot_cmd.use_position_control)
                 {
-
+                    robot_cmd.Gyro_Position_Pitch +=  DR16_instance.control_data.x / (float)MOUSE_MAX * MOUSE_YAW_SENSITIVITY;
+                    robot_cmd.Gyro_Position_Yaw +=  DR16_instance.control_data.y / (float)MOUSE_MAX * MOUSE_PITCH_SENSITIVITY;
                 }
                 robot_cmd.Velocity_Yaw = DR16_instance.control_data.x / (float)MOUSE_MAX * MOUSE_YAW_SENSITIVITY;
                 robot_cmd.Velocity_Pitch = DR16_instance.control_data.y / (float)MOUSE_MAX * MOUSE_PITCH_SENSITIVITY;
             }
             else if (robot_cmd.Control_mode == CONTROL_REMOTE)
             {
-                robot_cmd.Gyro_Position_Pitch =  * RC_YAW_SENSITIVITY;
-                robot_cmd.Gyro_Position_Yaw = robot_cmd.gimbal_yaw_velocity_target * RC_PITCH_SENSITIVITY;
-                // 位置控制模式下，速度目标为0
-                robot_cmd.Velocity_Yaw = 0.0f;
-                robot_cmd.Velocity_Pitch = 0.0f;
+                if(robot_cmd.use_position_control)
+                {
+                robot_cmd.Gyro_Position_Pitch = DR16_instance.control_data.Normalize_ch2 * RC_YAW_SENSITIVITY;
+                robot_cmd.Gyro_Position_Yaw   = DR16_instance.control_data.Normalize_ch3 * RC_PITCH_SENSITIVITY;
+                }
+                else 
+                {
+                    robot_cmd.Velocity_Yaw += DR16_instance.control_data.Normalize_ch2 * RC_YAW_SENSITIVITY;
+                    robot_cmd.Velocity_Pitch += DR16_instance.control_data.Normalize_ch3 * RC_PITCH_SENSITIVITY;
+                }
+
             }
         break;
         case GIMBAL_RUNNING_AIM:
             robot_cmd.Gyro_Position_Pitch = MiniPC_instance.receive_data.data.Ref_pitch;
-            robot_cmd.Gyro_Position_Yaw = MiniPC_instance.receive_data.data.Ref_yaw + 360.0f * INS_Info.YawRoundCount;
-        break;
-
-    }
-
-    if (robot_cmd.gimbal_mode == GIMBAL_RUNNING_AIM)
-    {
-        robot_cmd.use_velocity_control = 0U;
-
-        if (VisionCanAutoAim())
-        {
-            float vision_yaw = MiniPC_instance.receive_data.data.Ref_yaw;
-            float yaw_diff = vision_yaw - INS_Info.Yaw_Angle;
-            int32_t round_offset = 0;
-
+            float yaw_diff = MiniPC_instance.receive_data.data.Ref_yaw - INS_Info.Yaw_Angle;
+            int8_t round_offset = 0;
             if (yaw_diff < -240.0f)
             {
                 round_offset = 1;
@@ -392,68 +365,10 @@ static void Gimbal_Target_Update(void)
             {
                 round_offset = -1;
             }
+            robot_cmd.Gyro_Position_Yaw = MiniPC_instance.receive_data.data.Ref_yaw +(INS_Info.YawRoundCount + round_offset) * 360.0f;
+        break;
 
-            robot_cmd.Gyro_Yaw = (INS_Info.YawRoundCount + round_offset) * 360.0f + vision_yaw;
-            robot_cmd.Gyro_Pitch = INS_Info.Pitch_Angle + MiniPC_instance.receive_data.data.Ref_pitch;
-            yaw_velocity_cmd = 0.0f;
-            pitch_velocity_cmd = 0.0f;
-            robot_cmd.last_velocity_mode = 0U;
-            return;
-        }
-
-        robot_cmd.gimbal_mode = (robot_cmd.Control_mode == CONTROL_KEY_MOUSE)
-                                    ? GIMBAL_RUNNING_NORMAL
-                                    : GIMBAL_RUNNING_FOLLOW;
-        if (robot_cmd.shoot_mode == SHOOT_AIM)
-        {
-            robot_cmd.shoot_mode = SHOOT_READY;
-        }
     }
-
-    robot_cmd.use_velocity_control = 1U;
-
-    if (!robot_cmd.last_velocity_mode)
-    {
-        yaw_velocity_cmd = INS_Info.Yaw_Gyro;
-        pitch_velocity_cmd = INS_Info.Pitch_Gyro;
-    }
-
-    if (robot_cmd.Control_mode == CONTROL_KEY_MOUSE)
-    {
-        const float mouse_speed_yaw_gain = 320.0f;
-        const float mouse_speed_pitch_gain = 230.0f;
-        const float mouse_delta_yaw_gain = 140.0f;
-        const float mouse_delta_pitch_gain = 95.0f;
-        float yaw_speed_from_mouse = ((float)DR16_instance.control_data.x / (float)MOUSE_MAX) * mouse_speed_yaw_gain;
-        float pitch_speed_from_mouse = -((float)DR16_instance.control_data.y / (float)MOUSE_MAX) * mouse_speed_pitch_gain;
-        float yaw_speed_from_delta = DR16_instance.control_data.Postion_x * mouse_delta_yaw_gain;
-        float pitch_speed_from_delta = -DR16_instance.control_data.Postion_y * mouse_delta_pitch_gain;
-
-        yaw_speed_target = 0.6f * yaw_speed_from_mouse + 0.4f * yaw_speed_from_delta;
-        pitch_speed_target = 0.6f * pitch_speed_from_mouse + 0.4f * pitch_speed_from_delta;
-    }
-    else
-    {
-        yaw_speed_target = DR16_instance.control_data.Normalize_ch0 * 240.0f;
-        pitch_speed_target = DR16_instance.control_data.Normalize_ch1 * 180.0f;
-    }
-
-    deadline_limit(yaw_speed_target, 1.0f);
-    deadline_limit(pitch_speed_target, 1.0f);
-
-    yaw_speed_target = limit(yaw_speed_target, 300.0f, -300.0f);
-    pitch_speed_target = limit(pitch_speed_target, 220.0f, -220.0f);
-
-    yaw_velocity_cmd = SlewLimit(yaw_speed_target, yaw_velocity_cmd, 12.0f);
-    pitch_velocity_cmd = SlewLimit(pitch_speed_target, pitch_velocity_cmd, 10.0f);
-
-    robot_cmd.gimbal_yaw_velocity_target = yaw_velocity_cmd;
-    robot_cmd.gimbal_pitch_velocity_target = pitch_velocity_cmd;
-
-    robot_cmd.Gyro_Yaw = INS_Info.Yaw_TolAngle;
-    robot_cmd.Gyro_Pitch = INS_Info.Pitch_Angle;
-
-    robot_cmd.last_velocity_mode = 1U;
 }
 
 /* ==================== 小陀螺速度设置 ==================== */
