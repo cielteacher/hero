@@ -167,28 +167,6 @@ static void SBUS_TO_RC(uint8_t *sbus_buf)
         r_press_time = 0;
         instance->control_data.long_press_r = false;
     }
-    
-    // 按键计数 (检测上升沿)
-    for (uint16_t i = 0, j = 0x1; i < 16; j <<= 1, i++)
-    {
-        if (i == key_Shift || i == key_Ctrl)  // 跳过修饰键
-            continue;
-        
-        // 检测上升沿
-        if ((instance->control_data.keys.all_keys & j) && 
-            !(instance->control_data.last_keys.all_keys & j))
-        {
-            instance->control_data.key_count[KEY_PRESS][i]++;
-            
-            // Ctrl组合键
-            if (instance->control_data.keys.all_keys & Key_Ctrl)
-                instance->control_data.key_count[KEY_PRESS_WITH_CTRL][i]++;
-            
-            // Shift组合键
-            if (instance->control_data.keys.all_keys & Key_Shift)
-                instance->control_data.key_count[KEY_PRESS_WITH_SHIFT][i]++;
-        }
-    }
 }
 
 static void DecodeDR16(USARTInstance *_instance) 

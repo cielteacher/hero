@@ -59,6 +59,7 @@
 /* ============ 发射机构参数 ============ */
 #define PLUCK_SINGLE_ANGLE 1382         //!< 拨弹盘单发角度 (编码器单位)
 #define UNJAM_TIME 200                  //!< 卡弹判定时间 (ms)
+#define FRIC_SPEED_UP_TIME 300          //!< 摩擦轮加速时间 (ms)
 #define SHOOT_SPEED_Front 3700          //!< 前摩擦轮目标转速 (RPM)
 #define SHOOT_SPEED_Behind 4000         //!< 后摩擦轮目标转速 (RPM)
 #define SHOOT_UNIT_HEAT_17MM 5          //!< 17mm弹丸单发热量
@@ -123,11 +124,10 @@ typedef enum {
  * @brief 云台状态枚举
  */
 typedef enum {
-    GIMBAL_DISABLED = 0,       //!< 完全失能 (不执行任何控制)
-    GIMBAL_STOP,              //!< 停止 (保持当前角度，失能电机输出)
-    GIMBAL_RUNNING_FOLLOW, //!< 底盘跟随云台
+    GIMBAL_DISABLED = 0,   //!< 完全失能 (不执行任何控制)
+    GIMBAL_STOP,           //!< 停止 (保持当前角度，失能电机输出)
+    GIMBAL_RUNNING,        //!< 运行
     GIMBAL_RUNNING_AIM,    //!< 自瞄模式
-    GIMBAL_RUNNING_NORMAL  //!< 底盘分离模式
 } GimbalState_e;
 
 /**
@@ -162,47 +162,31 @@ typedef enum {
 /**
  * @brief 机器人控制命令结构体
  * @note  全局共享，由Gimbal_Cmd.c决策层更新，Gimbal.c/Shoot.c执行层读取
- *        
- *        角度参考说明:
- *        - Gyro_*: 陀螺仪坐标系，单位度，用于FOLLOW/AIM/SPIN模式
- *        - Mech_*: 机械角坐标系，单位编码器值，用于NORMAL模式或IMU离线时
- *        
- *        数据类型选择:
- *        - Gyro使用float匹配INS_Info结构
- *        - Mech使用int32/uint16匹配电机编码器数据类型
  */
 typedef struct {
     /* ===== 状态模式 ===== */
     Robot_State_e robot_state;      //!< 整车状态 (停止/运行)
     ControlMode_e Control_mode;     //!< 控制方式 (遥控器/键鼠)
     GimbalState_e gimbal_mode;      //!< 云台模式
+    GimbalState_e last_gimbal_mode;      //!< 上一帧云台模式
     ChassisState_e chassis_mode;    //!< 底盘模式
     ShootState_e shoot_mode;        //!< 发射模式
     eMidMode Mid_mode;              //!< 归中角度选择
     bool Speed_Up_flag;             //!< 加速标志
     bool Unlimit_flag;             //!< 解除功率限制标志 (底盘)
-    /* ===== 底盘控制量 ===== */
-    float rotate_feedforward;       //!< 小陀螺前馈 (底盘陀螺仪反馈)
+    /* ===== 底盘控制 ===== */
+    float rotate_feedforward;       //!< 小陀螺前馈 (由底盘陀螺仪反馈)
     float rotate_speed;             //!< 底盘旋转速度
-
-    /* ===== 云台控制模式 ===== */
-    uint8_t use_velocity_control;   //!< 1=速度模式(键鼠手动), 0=位置模式(遥控/自瞄)
-    float gimbal_yaw_velocity_target;    //!< Yaw角速度目标 (deg/s, 仅在speed模式使用)
-    float gimbal_pitch_velocity_target;  //!< Pitch角速度目标 (deg/s, 仅在speed模式使用)
-
-    /* ===== Cmd层内部状态（避免文件级静态） ===== */
-    GimbalState_e last_gimbal_mode;      //!< 上一帧云台模式
-    ControlMode_e last_control_mode;     //!< 上一帧控制模式
-    uint8_t last_velocity_mode;          //!< 上一帧是否速度模式
-
+    /* ===== 云台控制 ===== */
+    float Velocity_Yaw;    //!< Yaw角速度目标 (deg/s, 仅在speed模式使用)
+    float Velocity_Pitch;  //!< Pitch角速度目标 (deg/s, 仅在speed模式使用)
     /* ===== 云台陀螺仪参考 (IMU坐标系) ===== */
-    float Gyro_Yaw;                 //!< Yaw目标角度 (度, 连续累计)
-    float Gyro_Pitch;               //!< Pitch目标角度 (度, -180~180)
-    
+    float Gyro_Position_Yaw;                 //!< Yaw目标位置 (度, 连续累计)
+    float Gyro_Position_Pitch;               //!< Pitch目标位置 (度, -180~180)
     /* ===== 云台机械角参考 (编码器坐标系) ===== */
-    int32_t Mech_Yaw;               //!< Yaw目标角度 (连续机械角, 8192/圈)
-    uint16_t Mech_Pitch;            //!< Pitch目标角度 (单圈, 0~8191)
-    
+    int32_t Mech_Position_Yaw;               //!< Yaw目标角度 (连续机械角, 8192/圈)
+    uint16_t Mech_Position_Pitch;            //!< Pitch目标角度 (单圈, 0~8191)
+
 } Robot_ctrl_cmd_t;
 
 #endif /* __ROBOT_H */

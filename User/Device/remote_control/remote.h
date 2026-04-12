@@ -41,8 +41,9 @@
 
 // 输入模式枚举
 typedef enum {
-    REMOTE_INPUT = 0,        // 遥控器控制
-    KEY_MOUSE_INPUT = 1,     // 键鼠控制
+    Control_Stop = 0,       // 停止状态
+    REMOTE_INPUT = 1,        // 遥控器控制
+    KEY_MOUSE_INPUT = 2,     // 键鼠控制
 } InputMode_e;
 
 // 键位掩码定义
@@ -133,8 +134,6 @@ typedef struct {
     // 键盘数据
     volatile KeyState last_keys;
     volatile KeyState keys;
-    volatile uint8_t key_count[3][16];
-    
     // 长按标志
     bool long_press_l;
     bool long_press_r;
