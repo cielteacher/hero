@@ -55,7 +55,7 @@ static void DecodeDJIMotor(CANInstance *_instance)
  * @brief  停止电机
  * @param  motor: 电机实例指针
  */
-void DJIMotorStop(DJI_Motor_Instance *motor)
+void DJIMotordisable(DJI_Motor_Instance *motor)
 {
   uint8_t Data[8] = {0};
   memset(Data, 0, sizeof(Data));
@@ -111,7 +111,7 @@ void DJI_Motor_CAN_TxMessage(DJI_Motor_Instance *DJI_Motor, int16_t *txbuffer)
     CAN_Send(DJI_Motor->CANFrame, Data, 10);
   }
   else
-    DJIMotorStop(DJI_Motor);
+    DJIMotordisable(DJI_Motor);
 }
 void DJI_Motor_AliveCheck(void)
 {

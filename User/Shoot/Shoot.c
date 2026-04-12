@@ -1,74 +1,84 @@
 /**
  * @file    Shoot.c
- * @brief   英雄机器人发射机构控制
- * @note    1ms控制周期，只支持单发模式
- *          所有控制状态由robot_cmd.shoot_mode决定
+ * @brief   ???????????
+ * @note    1ms??????????????
  */
 #include "Shoot.h"
 #include "MiniPC.h"
-#include "robot.h"
 #include "can_comm.h"
+#include "robot.h"
 
-/* ============ 发射机构实例 ============ */
 Shoot_t shoot = {0};
 extern Robot_ctrl_cmd_t robot_cmd;
 
-/* ============ PID参数配置 ============ */
+#define FRIC_PID_INIT                                                                                 \
+    {                                                                                                 \
+        .Kp = 7.0f, .Ki = 0.0f, .Kd = 0.0f, .interlimit = 3000, .outlimit = 16000, .DeadBand = 0.50f, \
+        .inter_threLow = 500, .inter_threUp = 1000                                                   \
+    }
 
-/**
- * @brief 摩擦轮PID通用配置
- * @note  所有4个摩擦轮使用相同参数
- */
-#define FRIC_PID_INIT { \
-    .Kp = 7.0f, .Ki = 0.0f, .Kd = 0.0f, \
-    .interlimit = 3000, .outlimit = 16000, \
-    .DeadBand = 0.50f, .inter_threLow = 500, .inter_threUp = 1000 \
-}
+#define SINGLE_FIRE_POS_ERR_TH 5.0f
+#define SINGLE_FIRE_BRAKE_MIN_CYCLES 2U
+#define SINGLE_FIRE_BRAKE_MAX_CYCLES 5U
+#define SINGLE_FIRE_BRAKE_SPEED_TH 20.0f
 
-/* 摩擦轮速度环PID数组 */
 static PID Fric_Speed_PID[4] = {
-    FRIC_PID_INIT, FRIC_PID_INIT, FRIC_PID_INIT, FRIC_PID_INIT
+    FRIC_PID_INIT,
+    FRIC_PID_INIT,
+    FRIC_PID_INIT,
+    FRIC_PID_INIT,
 };
 
-/* 拨弹盘位置环PID */
 static PID_Smis Pluck_Place_PID = {
-    .Kp = 6.0f, .Ki = 0, .Kd = 0.0f,
-    .interlimit = 3000, .outlimit = 16000,
-    .DeadBand = 0.0f, .inter_threLow = 500, .inter_threUp = 1000
+    .Kp = 6.0f,
+    .Ki = 0,
+    .Kd = 0.0f,
+    .interlimit = 3000,
+    .outlimit = 16000,
+    .DeadBand = 0.0f,
+    .inter_threLow = 500,
+    .inter_threUp = 1000,
 };
 
-/* 拨弹盘速度环PID */
 static PID Pluck_Speed_PID = {
-    .Kp = 4.0f, .Ki = 0.0f, .Kd = 50.0f,
-    .interlimit = 5000, .outlimit = 15000,
-    .DeadBand = 0.0f, .inter_threLow = 20, .inter_threUp = 5000
+    .Kp = 4.0f,
+    .Ki = 0.0f,
+    .Kd = 50.0f,
+    .interlimit = 5000,
+    .outlimit = 15000,
+    .DeadBand = 0.0f,
+    .inter_threLow = 20,
+    .inter_threUp = 5000,
 };
 
-static uint8_t single_fire_state = 0;
+static uint8_t fire_step = 0U;
+static uint8_t fire_brake_ticks = 0U;
+static uint8_t keep_aim_after_fire = 0U;
 
-/* ============ 函数声明 ============ */
+/* ============ ?????? ============ */
+static void Shoot_Disable(void);
 static void Shoot_Stop(void);
-static void Fric_Wheel_Control(void);
-static void Single_Fire(void);
-static void Single_Fire_Reset(void);
-static void Jam_Handle(void);
-static void Pluck_Hold(void);
-static uint8_t VisionFireAllowed(void);
+static void FricWheelControl(void);
+static void SingleFire(uint8_t keep_aim_mode);
+static void SingleFireReset(void);
+static void JamCheck(void);
+static void JamHandle(void);
+static void PluckHold(void);
+static void HeatCheck(void);
+static void ResetShootState(void);
 
-/* ============ 发射机构初始化 ============ */
+/* ============ ??????? ============ */
 void Shoot_Init(void)
 {
-    // 摩擦轮通用配置模板
     DJI_Motor_Config fric_config = {
         .Type = DJI3508,
         .Control_Type = NONE_LOOP,
         .Can_Config = {
             .can_handle = &hfdcan1,
             .tx_id = 0x200,
-        }
+        },
     };
 
-    // 注册4个摩擦轮电机 (rx_id: 0x201~0x204)
     fric_config.Can_Config.rx_id = 0x201;
     shoot.fric_motor_1 = DJI_Motor_Init(&fric_config);
     fric_config.Can_Config.rx_id = 0x202;
@@ -78,7 +88,6 @@ void Shoot_Init(void)
     fric_config.Can_Config.rx_id = 0x204;
     shoot.fric_motor_4 = DJI_Motor_Init(&fric_config);
 
-    // 拨弹盘电机配置
     DJI_Motor_Config pluck_config = {
         .Type = DJI3508,
         .Control_Type = NONE_LOOP,
@@ -86,63 +95,214 @@ void Shoot_Init(void)
             .can_handle = &hfdcan2,
             .tx_id = 0x200,
             .rx_id = 0x201,
-        }
+        },
     };
     shoot.Pluck_motor = DJI_Motor_Init(&pluck_config);
 
-    // 初始化状态
     robot_cmd.shoot_mode = SHOOT_STOP;
     shoot.pluck_target_angle = 0;
+    shoot.pluck_lock = 0;
+    SingleFireReset();
 }
-/**
- * @brief 卡弹检测 - 通过速度和电流异常判断
- */
-static void Jam_Check(void)
+
+/* ============ ????? ============ */
+void Shoot_Control(void)
 {
-    static uint16_t stuck_time = 0;
+    if (shoot.Pluck_motor == NULL || shoot.fric_motor_1 == NULL || shoot.fric_motor_2 == NULL ||
+        shoot.fric_motor_3 == NULL || shoot.fric_motor_4 == NULL)
+    {
+        return;
+    }
+
+    if (robot_cmd.shoot_mode == SHOOT_DISABLED)
+    {
+        Shoot_Disable();
+        return;
+    }
+
+    HeatCheck();
+    JamCheck();
+
+    if (robot_cmd.shoot_mode != SHOOT_FIRE && robot_cmd.shoot_mode != SHOOT_AIM)
+    {
+        SingleFireReset();
+    }
+
+    switch (robot_cmd.shoot_mode)
+    {
+    case SHOOT_STOP:
+        Shoot_Stop();
+        break;
+
+    case SHOOT_READY_NOFRIC:
+    {
+        DJI_Motor_Instance *fric_motors[4] = {
+            shoot.fric_motor_1,
+            shoot.fric_motor_2,
+            shoot.fric_motor_3,
+            shoot.fric_motor_4,
+        };
+        int16_t txbuffer[4] = {0};
+
+        for (uint8_t i = 0; i < 4; i++)
+        {
+            PID_Control(fric_motors[i]->Data.SpeedFilter, 0.0f, &Fric_Speed_PID[i]);
+            txbuffer[i] = (int16_t)Fric_Speed_PID[i].pid_out;
+        }
+        DJI_Motor_CAN_TxMessage(shoot.fric_motor_1, txbuffer);
+    }
+        PluckHold();
+        break;
+
+    case SHOOT_READY:
+    case SHOOT_CHECKOUT:
+    case SHOOT_COOLING:
+        FricWheelControl();
+        PluckHold();
+        break;
+
+    case SHOOT_FIRE:
+        shoot.pluck_lock = 0U;
+        FricWheelControl();
+        SingleFire(0U);
+        break;
+
+    case SHOOT_AIM:
+    {
+        static uint16_t auto_fire_tick = 0U;
+        FricWheelControl();
+
+        if (MiniPC_instance.MiniPC_Online_Flag &&
+            MiniPC_instance.receive_data.data.dis <= 0.2f)
+        {
+            auto_fire_tick++;
+            if (auto_fire_tick >= 80U)
+            {
+                auto_fire_tick = 0U;
+                SingleFire(1U);
+            }
+            else
+            {
+                PluckHold();
+            }
+        }
+        else
+        {
+            auto_fire_tick = 0U;
+            PluckHold();
+        }
+        break;
+    }
+
+    case SHOOT_STUCKING:
+        FricWheelControl();
+        JamHandle();
+        break;
+
+    default:
+        Shoot_Disable();
+        break;
+    }
+}
+
+/* ============ ????? ============ */
+static void Shoot_Disable(void)
+{
+    DJIMotordisable(shoot.fric_motor_1);
+    DJIMotordisable(shoot.fric_motor_2);
+    DJIMotordisable(shoot.fric_motor_3);
+    DJIMotordisable(shoot.fric_motor_4);
+    DJIMotordisable(shoot.Pluck_motor);
+
+    ResetShootState();
+}
+
+static void Shoot_Stop(void)
+{
+    DJI_Motor_Instance *fric_motors[4] = {
+        shoot.fric_motor_1,
+        shoot.fric_motor_2,
+        shoot.fric_motor_3,
+        shoot.fric_motor_4,
+    };
+    int16_t txbuffer[4] = {0};
+    int16_t tx[4] = {0};
+
+    // ????????????????????0??????
+    for (uint8_t i = 0; i < 4; i++)
+    {
+        PID_Control(fric_motors[i]->Data.SpeedFilter, 0.0f, &Fric_Speed_PID[i]);
+        txbuffer[i] = (int16_t)Fric_Speed_PID[i].pid_out;
+    }
+    DJI_Motor_CAN_TxMessage(shoot.fric_motor_1, txbuffer);
+
+    tx[0] = 0;
+    DJI_Motor_CAN_TxMessage(shoot.Pluck_motor, tx);
+
+    ResetShootState();
+}
+
+static void ResetShootState(void)
+{
+    SingleFireReset();
+    shoot.pluck_lock = 0U;
+
+    for (uint8_t i = 0; i < 4; i++)
+    {
+        PID_IoutReset(&Fric_Speed_PID[i]);
+    }
+    PID_IoutReset(&Pluck_Speed_PID);
+}
+
+/* ============ ??????? ============ */
+static void JamCheck(void)
+{
+    static uint16_t jam_ticks = 0U;
 
     if (robot_cmd.shoot_mode == SHOOT_FIRE || robot_cmd.shoot_mode == SHOOT_AIM)
     {
-        // 速度过低或电流过高可能表示卡弹
         if (fabsf(shoot.Pluck_motor->Data.SpeedFilter) <= 50.0f ||
             fabsf(shoot.Pluck_motor->Data.CurrentFilter) >= 5000.0f)
         {
-            stuck_time++;
-            if (stuck_time >= UNJAM_TIME)
+            jam_ticks++;
+            if (jam_ticks >= UNJAM_TIME)
             {
                 robot_cmd.shoot_mode = SHOOT_STUCKING;
             }
         }
         else
         {
-            stuck_time = 0;
+            jam_ticks = 0U;
         }
     }
     else
     {
-        stuck_time = 0;
+        jam_ticks = 0U;
     }
 }
 
-/* ==================== 热量检测 ==================== */
-static void Heat_Check(void)
+static void HeatCheck(void)
 {
-    if (can_comm_instance.can_comm_online_flag == 0)
+    uint16_t remain;
+    uint8_t cooling_rate;
+    float heat_margin;
+    const float cool_enter_threshold = SHOOT_UNIT_HEAT_42MM * 1.2f;
+    const float cool_exit_threshold = SHOOT_UNIT_HEAT_42MM * 1.8f;
+
+    if (can_comm_instance.can_comm_online_flag == 0U)
     {
         robot_cmd.shoot_mode = SHOOT_STOP;
         return;
     }
 
-    uint16_t remain = can_comm_instance.can_comm_rx_data.heat_limit_remain;
-    uint8_t cooling_rate = can_comm_instance.can_comm_rx_data.shoot_barrel_cooling;
-    float heat_budget = (float)remain + cooling_rate * 0.001f;
-    const float cool_enter_threshold = SHOOT_UNIT_HEAT_42MM * 1.2f;
-    const float cool_exit_threshold = SHOOT_UNIT_HEAT_42MM * 1.8f;
+    remain = can_comm_instance.can_comm_rx_data.heat_limit_remain;
+    cooling_rate = can_comm_instance.can_comm_rx_data.shoot_barrel_cooling;
+    heat_margin = (float)remain + cooling_rate * 0.001f;
 
+    // ?????????????????
     if (robot_cmd.shoot_mode == SHOOT_COOLING)
     {
-        // 使用滞回阈值退出冷却，避免模式在边界点频繁抖动
-        if (heat_budget >= cool_exit_threshold)
+        if (heat_margin >= cool_exit_threshold)
         {
             robot_cmd.shoot_mode = SHOOT_READY;
         }
@@ -151,260 +311,192 @@ static void Heat_Check(void)
 
     if (robot_cmd.shoot_mode == SHOOT_FIRE || robot_cmd.shoot_mode == SHOOT_AIM)
     {
-        // 剩余热量不足时进入冷却
-        if (heat_budget < cool_enter_threshold)
+        if (heat_margin < cool_enter_threshold)
         {
             robot_cmd.shoot_mode = SHOOT_COOLING;
         }
     }
 }
-/* ============ 发射机构主控制函数 - 1ms周期 ============ */
-void Shoot_Control(void)
-{
-    // 每个控制周期先做安全检查，再进入状态机
-    Heat_Check();
-    Jam_Check();
 
-    if (robot_cmd.shoot_mode != SHOOT_FIRE && robot_cmd.shoot_mode != SHOOT_AIM)
+static void PluckHold(void)
+{
+    int16_t tx[4] = {0};
+
+    if (shoot.pluck_lock == 0U)
     {
-        Single_Fire_Reset();
+        shoot.pluck_target_angle = shoot.Pluck_motor->Data.Continuous_Mechanical_angle;
+        shoot.pluck_lock = 1U;
     }
 
-    switch (robot_cmd.shoot_mode)
-    {
-        case SHOOT_STOP:
-            Shoot_Stop();
-            break;
+    PID_Control_Smis(shoot.Pluck_motor->Data.Continuous_Mechanical_angle,
+                     shoot.pluck_target_angle,
+                     &Pluck_Place_PID,
+                     shoot.Pluck_motor->Data.SpeedFilter);
+    PID_Control(shoot.Pluck_motor->Data.SpeedFilter,
+                Pluck_Place_PID.pid_out,
+                &Pluck_Speed_PID);
 
-        case SHOOT_AIM:
+    tx[0] = (int16_t)limit(Pluck_Speed_PID.pid_out, 15000.0f, -15000.0f);
+    DJI_Motor_CAN_TxMessage(shoot.Pluck_motor, tx);
+}
+
+/* ============ ??????????? ============ */
+static void SingleFire(uint8_t keep_aim_mode)
+{
+    float angle_err;
+    int16_t tx[4] = {0};
+
+    // ??0??????????
+    if (fire_step == 0U)
+    {
+        shoot.pluck_target_angle = shoot.Pluck_motor->Data.Continuous_Mechanical_angle + PLUCK_SINGLE_ANGLE;
+        fire_step = 1U;
+        fire_brake_ticks = 0U;
+        keep_aim_after_fire = keep_aim_mode;
+        return;
+    }
+
+    // ??1???????????
+    if (fire_step == 1U)
+    {
+        PID_Control_Smis(shoot.Pluck_motor->Data.Continuous_Mechanical_angle,
+                         shoot.pluck_target_angle,
+                         &Pluck_Place_PID,
+                         shoot.Pluck_motor->Data.SpeedFilter);
+        PID_Control(shoot.Pluck_motor->Data.SpeedFilter,
+                    Pluck_Place_PID.pid_out,
+                    &Pluck_Speed_PID);
+
+        tx[0] = (int16_t)limit(Pluck_Speed_PID.pid_out, 15000.0f, -15000.0f);
+        DJI_Motor_CAN_TxMessage(shoot.Pluck_motor, tx);
+
+        angle_err = fabsf(shoot.Pluck_motor->Data.Continuous_Mechanical_angle - shoot.pluck_target_angle);
+        if (angle_err <= SINGLE_FIRE_POS_ERR_TH)
         {
-            static uint16_t auto_fire_div = 0;
-            Fric_Wheel_Control();
-            if (VisionFireAllowed())
-            {
-                auto_fire_div++;
-                if (auto_fire_div >= 80)
-                {
-                    auto_fire_div = 0;
-                    Single_Fire();
-                }
-                else
-                {
-                    Pluck_Hold();
-                }
-            }
-            else
-            {
-                auto_fire_div = 0;
-                Pluck_Hold();
-            }
-            break;
+            fire_step = 2U;
+            fire_brake_ticks = 0U;
         }
-            
-        case SHOOT_READY:
-            Fric_Wheel_Control();
-            Pluck_Hold();
-            break;
-            
-        case SHOOT_FIRE:
-            shoot.pluck_lock = 0; // 解锁拨弹盘位置
-            Fric_Wheel_Control();
-            Single_Fire();
-            break;
-            
-        case SHOOT_STUCKING:
-            Fric_Wheel_Control();
-            Jam_Handle();
-            break;
-
-        case SHOOT_CHECKOUT:
-            Fric_Wheel_Control();
-            Pluck_Hold();
-            break;
-            
-        case SHOOT_COOLING:
-            Fric_Wheel_Control();
-            Pluck_Hold();
-            break;
-            
-        default:
-            Shoot_Stop();
-            break;
+        return;
     }
-}
 
-/* ============ 发射机构停止 ============ */
-static void Shoot_Stop(void)
-{
-    DJIMotorStop(shoot.fric_motor_1);
-    DJIMotorStop(shoot.fric_motor_2);
-    DJIMotorStop(shoot.fric_motor_3);
-    DJIMotorStop(shoot.fric_motor_4);
-    DJIMotorStop(shoot.Pluck_motor);
-    Single_Fire_Reset();
-    
-    // 清除PID积分项
-    for (uint8_t i = 0; i < 4; i++)
+    // ??2?????????????
+    if (fire_step == 2U)
     {
-        PID_IoutReset(&Fric_Speed_PID[i]);
-    }
-    PID_IoutReset(&Pluck_Speed_PID);
-}
+        float brake_output = -shoot.Pluck_motor->Data.SpeedFilter * 65.0f;
+        tx[0] = (int16_t)limit(brake_output, 15000.0f, -15000.0f);
+        DJI_Motor_CAN_TxMessage(shoot.Pluck_motor, tx);
 
-/* ============ 拨弹盘保持位置 ============ */
-static void Pluck_Hold(void)
-{
-	if(shoot.pluck_lock == 0)
-	{
-		shoot.pluck_target_angle = shoot.Pluck_motor->Data.Continuous_Mechanical_angle;
-		shoot.pluck_lock = 1;
-	}
-    PID_Control_Smis(shoot.Pluck_motor->Data.Continuous_Mechanical_angle,
-                     shoot.pluck_target_angle, &Pluck_Place_PID,
-                     shoot.Pluck_motor->Data.SpeedFilter);
-    PID_Control(shoot.Pluck_motor->Data.SpeedFilter, Pluck_Place_PID.pid_out,
-                &Pluck_Speed_PID);
-    
-    int16_t pluck_output[4] = {0};
-    pluck_output[0] = (int16_t)Pluck_Speed_PID.pid_out;
-    DJI_Motor_CAN_TxMessage(shoot.Pluck_motor, pluck_output);
-}
-
-/* ============ 单发控制 ============ */
-static void Single_Fire(void)
-{
-    if (single_fire_state == 0)
-    {
-        shoot.pluck_target_angle =shoot.Pluck_motor->Data.Continuous_Mechanical_angle  + PLUCK_SINGLE_ANGLE;
-        single_fire_state = 1;
-    }
-    
-    // 双环PID控制
-    PID_Control_Smis(shoot.Pluck_motor->Data.Continuous_Mechanical_angle,
-                     shoot.pluck_target_angle, &Pluck_Place_PID,
-                     shoot.Pluck_motor->Data.SpeedFilter);
-    PID_Control(shoot.Pluck_motor->Data.SpeedFilter, Pluck_Place_PID.pid_out,
-                &Pluck_Speed_PID);
-    
-    int16_t pluck_output[4] = {0};
-    pluck_output[0] = (int16_t)Pluck_Speed_PID.pid_out;
-    DJI_Motor_CAN_TxMessage(shoot.Pluck_motor, pluck_output);
-
-    // 判断到位
-    if (fabsf(shoot.Pluck_motor->Data.Continuous_Mechanical_angle - shoot.pluck_target_angle) <= 5.0f)
-    {
-        robot_cmd.shoot_mode = SHOOT_READY;
-        shoot.pluck_lock = 0;
-        single_fire_state = 0;
+        fire_brake_ticks++;
+        if ((fire_brake_ticks >= SINGLE_FIRE_BRAKE_MIN_CYCLES &&
+             fabsf(shoot.Pluck_motor->Data.SpeedFilter) <= SINGLE_FIRE_BRAKE_SPEED_TH) ||
+            (fire_brake_ticks >= SINGLE_FIRE_BRAKE_MAX_CYCLES))
+        {
+            shoot.pluck_lock = 0U;
+            fire_step = 0U;
+            fire_brake_ticks = 0U;
+            robot_cmd.shoot_mode = keep_aim_after_fire ? SHOOT_AIM : SHOOT_READY;
+        }
     }
 }
 
-static void Single_Fire_Reset(void)
+static void SingleFireReset(void)
 {
-    single_fire_state = 0;
+    fire_step = 0U;
+    fire_brake_ticks = 0U;
+    keep_aim_after_fire = 0U;
 }
 
-/**
- * @brief 检查视觉是否允许开火
- * @return 1=允许, 0=不允许
- */
-static uint8_t VisionFireAllowed(void)
+/* ============ ????? ============ */
+static void FricWheelControl(void)
 {
-    return (MiniPC_instance.MiniPC_Online_Flag &&
-            MiniPC_instance.receive_data.data.dis <= 0.2f) ? 1U : 0U;
-}
-
-/**
- * @brief 摩擦轮控制 (4轮速度环)
- * @note  前后摩擦轮方向相反以产生旋转
- */
-static void Fric_Wheel_Control(void)
-{
-    // 摩擦轮速度目标 (正负表示方向)
     static const float fric_targets[4] = {
-        SHOOT_SPEED_Front,   // 电机1 (左前正转)
-        -SHOOT_SPEED_Front,  // 电机2 (右前反转)
-        SHOOT_SPEED_Behind,  // 电机3 (左后正转)
-        -SHOOT_SPEED_Behind  // 电机4 (右后反转)
+        SHOOT_SPEED_Front,
+        -SHOOT_SPEED_Front,
+        SHOOT_SPEED_Behind,
+        -SHOOT_SPEED_Behind,
     };
-    
-    // 获取各电机实例指针数组便于遍历
+
     DJI_Motor_Instance *fric_motors[4] = {
-        shoot.fric_motor_1, shoot.fric_motor_2, 
-        shoot.fric_motor_3, shoot.fric_motor_4
+        shoot.fric_motor_1,
+        shoot.fric_motor_2,
+        shoot.fric_motor_3,
+        shoot.fric_motor_4,
     };
-    
+
     int16_t txbuffer[4] = {0};
-    
-    // PID计算
+
     for (uint8_t i = 0; i < 4; i++)
     {
         PID_Control(fric_motors[i]->Data.SpeedFilter, fric_targets[i], &Fric_Speed_PID[i]);
         txbuffer[i] = (int16_t)Fric_Speed_PID[i].pid_out;
     }
-    
+
     DJI_Motor_CAN_TxMessage(shoot.fric_motor_1, txbuffer);
 }
 
-/**
- * @brief 卡弹处理状态机
- * @note  流程: 反转退弹 -> 等待 -> 正转恢复
- */
-static void Jam_Handle(void)
+/* ============ ??????? ============ */
+static void JamHandle(void)
 {
     static Jam_State_e jam_state = JAM_IDLE;
-    static float target_angle = 0;
-    static uint16_t timer = 0;
-    int16_t can_send[4] = {0};
-
+    static float target_angle = 0.0f;
+    static uint16_t timer = 0U;
     float current_angle = (float)shoot.Pluck_motor->Data.Continuous_Mechanical_angle;
+    int16_t tx[4] = {0};
 
     switch (jam_state)
     {
-    case JAM_IDLE: // 初始化：设置反转目标
+    case JAM_IDLE:
         target_angle = current_angle - PLUCK_SINGLE_ANGLE * 0.7f;
-        timer = 0;
+        timer = 0U;
         jam_state = JAM_BACKWARD;
         break;
 
-    case JAM_BACKWARD: // 反转退弹
-        PID_Control_Smis(current_angle, target_angle, &Pluck_Place_PID,
+    case JAM_BACKWARD:
+        // ?????????????
+        PID_Control_Smis(current_angle,
+                         target_angle,
+                         &Pluck_Place_PID,
                          shoot.Pluck_motor->Data.SpeedFilter);
-        PID_Control(shoot.Pluck_motor->Data.SpeedFilter, Pluck_Place_PID.pid_out, &Pluck_Speed_PID);
-        
-        can_send[0] = (int16_t)Pluck_Speed_PID.pid_out;
-        DJI_Motor_CAN_TxMessage(shoot.Pluck_motor, can_send);
+        PID_Control(shoot.Pluck_motor->Data.SpeedFilter,
+                    Pluck_Place_PID.pid_out,
+                    &Pluck_Speed_PID);
+        tx[0] = (int16_t)limit(Pluck_Speed_PID.pid_out, 15000.0f, -15000.0f);
+        DJI_Motor_CAN_TxMessage(shoot.Pluck_motor, tx);
 
         if (fabsf(current_angle - target_angle) < 2.0f)
         {
-            timer = 0;
+            timer = 0U;
             jam_state = JAM_WAIT;
         }
         break;
 
-    case JAM_WAIT: // 等待弹丸释放
-        DJI_Motor_CAN_TxMessage(shoot.Pluck_motor, can_send); // 发送零输出
-
+    case JAM_WAIT:
+        tx[0] = 0;
+        DJI_Motor_CAN_TxMessage(shoot.Pluck_motor, tx);
         timer++;
-        if (timer > 100) // 100ms后准备正转
+        if (timer > 100U)
         {
             target_angle = current_angle + PLUCK_SINGLE_ANGLE;
             jam_state = JAM_FORWARD;
         }
         break;
 
-    case JAM_FORWARD: // 正转恢复
-        PID_Control_Smis(current_angle, target_angle, &Pluck_Place_PID,
+    case JAM_FORWARD:
+        // ???????????????
+        PID_Control_Smis(current_angle,
+                         target_angle,
+                         &Pluck_Place_PID,
                          shoot.Pluck_motor->Data.SpeedFilter);
-        PID_Control(shoot.Pluck_motor->Data.SpeedFilter, Pluck_Place_PID.pid_out, &Pluck_Speed_PID);
-
-        can_send[0] = (int16_t)Pluck_Speed_PID.pid_out;
-        DJI_Motor_CAN_TxMessage(shoot.Pluck_motor, can_send);
+        PID_Control(shoot.Pluck_motor->Data.SpeedFilter,
+                    Pluck_Place_PID.pid_out,
+                    &Pluck_Speed_PID);
+        tx[0] = (int16_t)limit(Pluck_Speed_PID.pid_out, 15000.0f, -15000.0f);
+        DJI_Motor_CAN_TxMessage(shoot.Pluck_motor, tx);
 
         if (fabsf(current_angle - target_angle) < 2.0f)
         {
             jam_state = JAM_IDLE;
-            robot_cmd.shoot_mode = SHOOT_READY; // 退出卡弹处理
+            robot_cmd.shoot_mode = SHOOT_READY;
         }
         break;
     }

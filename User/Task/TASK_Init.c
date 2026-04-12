@@ -20,7 +20,7 @@ void Task_init(void)
   xTaskCreate((TaskFunction_t)Task_Usart, "Task_Usart", 512, NULL, 8, &Task_Usart_Handle);
   xTaskCreate((TaskFunction_t)Task_Alive, "Task_Alive", 128, NULL, 8, &Task_Alive_Handle);
 	 xTaskCreate((TaskFunction_t)Task_Minipc, "Task_Minipc", 128, NULL, 8, &Task_Minipc_Handle);
-  xTaskCreate((TaskFunction_t)Task_Robot_Control, "Task_Robot_Control", 512, NULL, 7, &Task_Robot_Control_Handle);
+  xTaskCreate((TaskFunction_t)Task_Robot_Control, "Task_Robot_Control", 512, NULL, 9, &Task_Robot_Control_Handle);
   taskEXIT_CRITICAL(); // 退出临界区
   /*  初始化  */
 	DR16_Init(); // 遥控器初始化

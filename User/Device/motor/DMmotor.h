@@ -95,7 +95,7 @@ typedef struct
   float Angle;
 } DM_Motor_Contorl_info;
 
-extern void DMMotorStop(DM_Motor_Instance *motor);
+extern void DMMotordisable(DM_Motor_Instance *motor);
 extern void DMMotorEnable(DM_Motor_Instance *motor);
 extern void DMMotorClear(DM_Motor_Instance *instance);
 extern DM_Motor_Instance *DM_Motor_Init(DM_Motor_Info_Typedef *_config);

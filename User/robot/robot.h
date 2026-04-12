@@ -108,7 +108,8 @@ typedef enum {
  * @brief 发射状态枚举
  */
 typedef enum {
-    SHOOT_STOP = 0,        //!< 停止
+    SHOOT_DISABLED = 0,     //!< 完全失能 (不执行任何控制)
+    SHOOT_STOP ,            //!< 停止（摩擦轮和拨弹盘速度为0）
     SHOOT_READY_NOFRIC,    //!< 准备(摩擦轮不启动)
     SHOOT_READY,           //!< 准备(摩擦轮启动)
     SHOOT_AIM,             //!< 自瞄开火
@@ -122,7 +123,8 @@ typedef enum {
  * @brief 云台状态枚举
  */
 typedef enum {
-    GIMBAL_STOP = 0,       //!< 停止
+    GIMBAL_DISABLED = 0,       //!< 完全失能 (不执行任何控制)
+    GIMBAL_STOP,              //!< 停止 (保持当前角度，失能电机输出)
     GIMBAL_RUNNING_FOLLOW, //!< 底盘跟随云台
     GIMBAL_RUNNING_AIM,    //!< 自瞄模式
     GIMBAL_RUNNING_NORMAL  //!< 底盘分离模式
@@ -132,7 +134,8 @@ typedef enum {
  * @brief 底盘状态枚举
  */
 typedef enum {
-    CHASSIS_STOP = 0,        //!< 停止
+    CHASSIS_DISABLED = 0,     //!< 完全失能 (不执行任何控制)
+    CHASSIS_STOP,        //!< 停止
     CHASSIS_RUNNING_FOLLOW,  //!< 跟随云台
     CHASSIS_RUNNING_SPIN,    //!< 小陀螺
     CHASSIS_RUNNING_NORMAL,  //!< 独立移动
@@ -181,7 +184,17 @@ typedef struct {
     /* ===== 底盘控制量 ===== */
     float rotate_feedforward;       //!< 小陀螺前馈 (底盘陀螺仪反馈)
     float rotate_speed;             //!< 底盘旋转速度
-    
+
+    /* ===== 云台控制模式 ===== */
+    uint8_t use_velocity_control;   //!< 1=速度模式(键鼠手动), 0=位置模式(遥控/自瞄)
+    float gimbal_yaw_velocity_target;    //!< Yaw角速度目标 (deg/s, 仅在speed模式使用)
+    float gimbal_pitch_velocity_target;  //!< Pitch角速度目标 (deg/s, 仅在speed模式使用)
+
+    /* ===== Cmd层内部状态（避免文件级静态） ===== */
+    GimbalState_e last_gimbal_mode;      //!< 上一帧云台模式
+    ControlMode_e last_control_mode;     //!< 上一帧控制模式
+    uint8_t last_velocity_mode;          //!< 上一帧是否速度模式
+
     /* ===== 云台陀螺仪参考 (IMU坐标系) ===== */
     float Gyro_Yaw;                 //!< Yaw目标角度 (度, 连续累计)
     float Gyro_Pitch;               //!< Pitch目标角度 (度, -180~180)

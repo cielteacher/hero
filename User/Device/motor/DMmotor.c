@@ -97,7 +97,7 @@ void DMMotorEnable(DM_Motor_Instance *instance)
 * @details:    	通过CAN总线向特定电机发送启用特定模式的命令
 ************************************************************************
 **/
-void DMMotorStop(DM_Motor_Instance *instance)
+void DMMotordisable(DM_Motor_Instance *instance)
 {
 	uint8_t data[8] = {0,0,0,0,0,0,0,0};
 	CAN_Send(instance->CAN_instance, data, 10);
@@ -178,7 +178,7 @@ void DM_Motor_MIT_CAN_TxMessage(DM_Motor_Instance *DM_Motor, float pos, float ve
 		data[7] = tor_tmp;
 		CAN_Send(DM_Motor->CAN_instance, data, 1);
 	}	else
-		DMMotorStop(DM_Motor);
+		DMMotordisable(DM_Motor);
 }
 
 /**
@@ -202,7 +202,7 @@ void DM_Motor_DJI_CAN_TxMessage(DM_Motor_Instance *DM_Motor, int16_t *txbuffer)
 		Data[7] = txbuffer[3];
 		CAN_Send(DM_Motor->CAN_instance, Data, 10);
 	}	else
-		DMMotorStop(DM_Motor);
+		DMMotordisable(DM_Motor);
 }
 void DM_Motor_AliveCheck(void) {
 	for (uint8_t i = 0; i < DM_idx; i++)

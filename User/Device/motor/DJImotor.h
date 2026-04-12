@@ -57,7 +57,7 @@ extern DJI_Motor_Instance dji_motor_instance[DJI_MOTOR_CNT];
 
 // º¯ÊýÉùÃ÷
 DJI_Motor_Instance *DJI_Motor_Init(DJI_Motor_Config *_config);
-void DJIMotorStop(DJI_Motor_Instance *motor);
+void DJIMotordisable(DJI_Motor_Instance *motor);
 void DJI_Motor_CAN_TxMessage(DJI_Motor_Instance *DJI_Motor, int16_t *txbuffer);
 void DJI_Motor_AliveCheck(void);
 #endif

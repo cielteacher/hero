@@ -65,7 +65,7 @@ float PID_Control(float current, float expected,PID *parameter)
     parameter->ITerm = 0;
   // 积分限幅
   parameter->Iout += parameter->ITerm * parameter->Ki * parameter->dt;
-  limit(parameter->Iout, parameter->interlimit, -parameter->interlimit);
+  parameter->Iout = limit(parameter->Iout, parameter->interlimit, -parameter->interlimit);
 
   //  微分计算 微分先行
   if (parameter->dt > 1e-6f) {
@@ -75,7 +75,7 @@ float PID_Control(float current, float expected,PID *parameter)
   }
   // 输出计算
   parameter->pid_out = parameter->Pout + parameter->Iout + parameter->Dout;
-  limit(parameter->pid_out, parameter->outlimit, -parameter->outlimit);
+  parameter->pid_out = limit(parameter->pid_out, parameter->outlimit, -parameter->outlimit);
   // 善后工作
   parameter->error_last = error_now;
   parameter->last_measure = current;
@@ -128,11 +128,11 @@ float PID_Control_Smis(float current, float expected, PID_Smis *parameter,float 
   parameter->Dout = parameter->Kd * speed;
   // 积分限幅
   parameter->Iout += parameter->ITerm * parameter->Ki * parameter->dt;
-  limit(parameter->Iout, parameter->interlimit, -parameter->interlimit);
+  parameter->Iout = limit(parameter->Iout, parameter->interlimit, -parameter->interlimit);
   // 输出计算
   parameter->pid_out = parameter->Pout + parameter->Iout + parameter->Dout;
   // 输出限幅
-  limit(parameter->pid_out, parameter->outlimit, -parameter->outlimit);
+  parameter->pid_out = limit(parameter->pid_out, parameter->outlimit, -parameter->outlimit);
   parameter->error_last = error_now;
   parameter->last_pid_out = parameter->pid_out;
   return parameter->pid_out;
@@ -164,7 +164,7 @@ float FeedForward_Calc(FeedForward_Typedef *FF, float In) {
 
   FF->Last_DeltIn = FF->Now_DeltIn;
   FF->Last_dout = FF->Ref_dot;
-  limit(FF->Out, FF->OutMax, -FF->OutMax);
+  FF->Out = limit(FF->Out, FF->OutMax, -FF->OutMax);
 
   return FF->Out;
 }
