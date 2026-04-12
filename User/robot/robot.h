@@ -168,7 +168,6 @@ typedef struct {
     Robot_State_e robot_state;      //!< 整车状态 (停止/运行)
     ControlMode_e Control_mode;     //!< 控制方式 (遥控器/键鼠)
     GimbalState_e gimbal_mode;      //!< 云台模式
-    GimbalState_e last_gimbal_mode;      //!< 上一帧云台模式
     ChassisState_e chassis_mode;    //!< 底盘模式
     ShootState_e shoot_mode;        //!< 发射模式
     eMidMode Mid_mode;              //!< 归中角度选择
@@ -178,14 +177,12 @@ typedef struct {
     float rotate_feedforward;       //!< 小陀螺前馈 (由底盘陀螺仪反馈)
     float rotate_speed;             //!< 底盘旋转速度
     /* ===== 云台控制 ===== */
+    bool use_position_control;       //!< 云台是否使用位置控制 (否则使用速度控制)
     float Velocity_Yaw;    //!< Yaw角速度目标 (deg/s, 仅在speed模式使用)
     float Velocity_Pitch;  //!< Pitch角速度目标 (deg/s, 仅在speed模式使用)
     /* ===== 云台陀螺仪参考 (IMU坐标系) ===== */
     float Gyro_Position_Yaw;                 //!< Yaw目标位置 (度, 连续累计)
     float Gyro_Position_Pitch;               //!< Pitch目标位置 (度, -180~180)
-    /* ===== 云台机械角参考 (编码器坐标系) ===== */
-    int32_t Mech_Position_Yaw;               //!< Yaw目标角度 (连续机械角, 8192/圈)
-    uint16_t Mech_Position_Pitch;            //!< Pitch目标角度 (单圈, 0~8191)
 
 } Robot_ctrl_cmd_t;
 

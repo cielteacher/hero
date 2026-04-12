@@ -9,6 +9,7 @@
 #include "robot.h"
 #include "slope.h"
 #include <math.h>
+#include <stdbool.h>
 
 /* ==================== 全局/静态变量 ==================== */
 Robot_ctrl_cmd_t robot_cmd = {0};
@@ -48,14 +49,9 @@ static void Gimbal_Target_Update(void);
 static void Chassis_Comm_Update(uint8_t gimbal_online_now, uint8_t shoot_online_now);
 static void Rotate_Speed_Set(void);
 static void Follow_Rotate_Speed_Update(uint8_t gimbal_online_now);
-static void ApplySafetyInterlocks(uint8_t gimbal_online_now,
-                                  uint8_t shoot_online_now,
-                                  uint8_t chassis_online_now);
 static void SyncCmdReferenceToFeedback(void);
-static void ClearGimbalVelocityControlState(void);
-static void ForceRobotDisabledState(void);
 static float SlewLimit(float target, float current, float step);
-
+// 检查模块在线（奇妙的检测逻辑，等有时间了在改改）
 /**
  * @brief 检查云台模块在线状态
  */
@@ -66,7 +62,7 @@ static uint8_t CheckGimbalOnline(void)
         robot_cmd.gimbal_mode = GIMBAL_DISABLED;
         return 0U;
     }
-    if(!gimbal.yaw_motor->dji_motor_online_flag || !gimbal.pitch_motor->dji_motor_online_flag)
+    if(!gimbal.yaw_motor->dm_motor_online_flag || !gimbal.pitch_motor->dm_motor_online_flag)
     {
         robot_cmd.gimbal_mode = GIMBAL_DISABLED;
         return 0U;
@@ -81,22 +77,29 @@ static uint8_t CheckShootOnline(void)
     if (shoot.Pluck_motor == NULL || shoot.fric_motor_1 == NULL || shoot.fric_motor_2 == NULL ||
         shoot.fric_motor_3 == NULL || shoot.fric_motor_4 == NULL)
     {
+        robot_cmd.shoot_mode = SHOOT_DISABLED;
         return 0U;
     }
-
-    return (shoot.Pluck_motor->dji_motor_online_flag &&
-            shoot.fric_motor_1->dji_motor_online_flag &&
-            shoot.fric_motor_2->dji_motor_online_flag &&
-            shoot.fric_motor_3->dji_motor_online_flag &&
-            shoot.fric_motor_4->dji_motor_online_flag)
-               ? 1U
-               : 0U;
+    if(!shoot.Pluck_motor->dji_motor_online_flag || !shoot.fric_motor_1->dji_motor_online_flag ||
+       !shoot.fric_motor_2->dji_motor_online_flag || !shoot.fric_motor_3->dji_motor_online_flag ||
+       !shoot.fric_motor_4->dji_motor_online_flag)
+    {
+        robot_cmd.shoot_mode = SHOOT_DISABLED;
+        return 0U;
+    }
 }
 
 static uint8_t VisionCanAutoAim(void)
 {
-    return (MiniPC_instance.MiniPC_Online_Flag &&
-        MiniPC_instance.receive_data.data.dis <= 0.2f)? 1U: 0U;
+    if(MiniPC_instance.MiniPC_Online_Flag &&MiniPC_instance.receive_data.data.dis <= 0.2f)
+    {
+        return 1U;
+    }
+    else 
+    {
+        robot_cmd.use_position_control = true;
+        return 0U;
+    }
 }
 
 
@@ -119,21 +122,6 @@ static float SlewLimit(float target, float current, float step)
     return current + delta;
 }
 
-static void SyncCmdReferenceToFeedback(void)
-{
-    if (gimbal.yaw_motor == NULL || gimbal.pitch_motor == NULL)
-    {
-        return;
-    }
-
-    robot_cmd.Mech_Yaw = gimbal.yaw_motor->Data.DJI_data.Continuous_Mechanical_angle;
-    robot_cmd.Mech_Pitch = gimbal.pitch_motor->Data.DJI_data.MechanicalAngle;
-
-    robot_cmd.Gyro_Yaw = INS_Info.Yaw_TolAngle;
-    robot_cmd.Gyro_Pitch = INS_Info.Pitch_Angle;
-}
-
-
 /* ==================== 机器人初始化 ==================== */
 void Robot_Init(void)
 {
@@ -153,9 +141,9 @@ void Robot_Init(void)
     robot_cmd.robot_state = ROBOT_STOP;
     robot_cmd.chassis_mode = CHASSIS_STOP;
     robot_cmd.Mid_mode = MID_FRONT;
-    ClearGimbalVelocityControlState();
-    robot_cmd.last_gimbal_mode = robot_cmd.gimbal_mode;
-
+    robot_cmd.use_position_control = false;
+    robot_cmd.Gyro_Position_Pitch = INS_Info.Pitch_Angle;
+    robot_cmd.Gyro_Position_Yaw = INS_Info.Yaw_TolAngle;
     Gimbal_Init();
     Shoot_Init();
     Can_Comm_Init();
@@ -164,10 +152,9 @@ void Robot_Init(void)
 /* ==================== 机器人状态更新 ==================== */
 void Robot_Update(void)
 {
-    uint8_t remote_online = DR16_instance.dr16_online_flag;
-    uint8_t chassis_online_now = can_comm_instance.can_comm_online_flag;
+    robot_cmd.use_position_control = false; // 默认使用速度控制，除非进入自瞄模式但视觉不可用才退化到速度控制
     // 遥控器掉线优先级最高，立即进入全失能状态；底盘/云台/发射模块掉线则进入对应的失能状态，但不影响其他模块继续工作。
-    if (!remote_online)
+    if (!DR16_instance.dr16_online_flag)
     {
         robot_cmd.robot_state = ROBOT_STOP;
     }
@@ -179,7 +166,7 @@ void Robot_Update(void)
     {
         robot_cmd.gimbal_mode = GIMBAL_DISABLED;
         robot_cmd.shoot_mode = SHOOT_DISABLED;
-        if(chassis_online_now)
+        if(can_comm_instance.can_comm_online_flag)
         {
             Chassis_Comm_Update( 0U, 0U);
         }
@@ -346,17 +333,45 @@ static void KMUpdate(void)
 /* ==================== 云台目标更新 ==================== */
 static void Gimbal_Target_Update(void)
 {
-    static float yaw_velocity_cmd = 0.0f;
-    static float pitch_velocity_cmd = 0.0f;
-    float yaw_speed_target = 0.0f;
-    float pitch_speed_target = 0.0f;
+    switch(robot_cmd.gimbal_mode)
+    {    
+        case GIMBAL_DISABLED:// 全失能状态，直接退出
+            robot_cmd.Gyro_Position_Pitch = INS_Info.Pitch_Angle;
+            robot_cmd.Gyro_Position_Yaw = INS_Info.Yaw_TolAngle;
+            robot_cmd.Velocity_Yaw = 0.0f;
+            robot_cmd.Velocity_Pitch = 0.0f;
+            return;
+        break;
+        case GIMBAL_STOP:// 停止状态，保持当前角度(保持不住....)
+            robot_cmd.Gyro_Position_Pitch = INS_Info.Pitch_Angle;
+            robot_cmd.Gyro_Position_Yaw = INS_Info.Yaw_TolAngle;
+            robot_cmd.Velocity_Yaw = 0.0f;
+            robot_cmd.Velocity_Pitch = 0.0f;
+         break;
+        case GIMBAL_RUNNING:
+            if (robot_cmd.Control_mode == CONTROL_KEY_MOUSE)
+            {
+                if(robot_cmd.use_position_control)
+                {
 
-    if (robot_cmd.gimbal_mode == GIMBAL_DISABLED || robot_cmd.gimbal_mode == GIMBAL_STOP)
-    {
-        ClearGimbalVelocityControlState();
-        yaw_velocity_cmd = 0.0f;
-        pitch_velocity_cmd = 0.0f;
-        return;
+                }
+                robot_cmd.Velocity_Yaw = DR16_instance.control_data.x / (float)MOUSE_MAX * MOUSE_YAW_SENSITIVITY;
+                robot_cmd.Velocity_Pitch = DR16_instance.control_data.y / (float)MOUSE_MAX * MOUSE_PITCH_SENSITIVITY;
+            }
+            else if (robot_cmd.Control_mode == CONTROL_REMOTE)
+            {
+                robot_cmd.Gyro_Position_Pitch =  * RC_YAW_SENSITIVITY;
+                robot_cmd.Gyro_Position_Yaw = robot_cmd.gimbal_yaw_velocity_target * RC_PITCH_SENSITIVITY;
+                // 位置控制模式下，速度目标为0
+                robot_cmd.Velocity_Yaw = 0.0f;
+                robot_cmd.Velocity_Pitch = 0.0f;
+            }
+        break;
+        case GIMBAL_RUNNING_AIM:
+            robot_cmd.Gyro_Position_Pitch = MiniPC_instance.receive_data.data.Ref_pitch;
+            robot_cmd.Gyro_Position_Yaw = MiniPC_instance.receive_data.data.Ref_yaw + 360.0f * INS_Info.YawRoundCount;
+        break;
+
     }
 
     if (robot_cmd.gimbal_mode == GIMBAL_RUNNING_AIM)
