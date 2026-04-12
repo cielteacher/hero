@@ -46,9 +46,9 @@ static PID Chassis_Rotate_PID = {
 static void RCUpdate(void);
 static void KMUpdate(void);
 static void Gimbal_Target_Update(void);
-static void Chassis_Comm_Update(uint8_t gimbal_online_now, uint8_t shoot_online_now);
+static void Chassis_Comm_Update(void);
 static void Rotate_Speed_Set(void);
-static void Follow_Rotate_Speed_Update(uint8_t gimbal_online_now);
+static void Follow_Rotate_Speed_Update(void);
 // 检查模块在线（奇妙的检测逻辑，等有时间了在改改）
 /**
  * @brief 检查云台模块在线状态
@@ -65,6 +65,7 @@ static uint8_t CheckGimbalOnline(void)
         robot_cmd.gimbal_mode = GIMBAL_DISABLED;
         return 0U;
     }
+    return 1U;
 }
 
 /**
@@ -85,6 +86,7 @@ static uint8_t CheckShootOnline(void)
         robot_cmd.shoot_mode = SHOOT_DISABLED;
         return 0U;
     }
+    return 1U;
 }
 /**
  * @brief 视觉是否可以接管云台
@@ -168,7 +170,7 @@ void Robot_Update(void)
     }
 
     Gimbal_Target_Update();
-    Chassis_Comm_Update(robot_cmd.gimbal_mode?1u:0u , robot_cmd.shoot_mode?1u:0u);
+    Chassis_Comm_Update();
 }
 // ==================== 模式更新 键鼠+遥控器 具体云台转动再gimbal函数处理 ====================
 /*
@@ -261,9 +263,10 @@ static void KMUpdate(void)
     {
         robot_cmd.chassis_mode = CHASSIS_RUNNING_NORMAL;
     }
+    // 长按鼠标右键开启自瞄
     if (DR16_instance.control_data.long_press_r)
     {
-        if (VisionCanAutoAim())
+        if (VisionCanAutoAim())//检查自瞄是否可用
         {
             robot_cmd.gimbal_mode = GIMBAL_RUNNING_AIM;
             robot_cmd.chassis_mode = CHASSIS_RUNNING_NORMAL;
@@ -280,6 +283,7 @@ static void KMUpdate(void)
     {
         robot_cmd.chassis_mode = CHASSIS_RUNNING_SPIN;
     }
+    // 左键控制 开火
     static uint16_t speed_up_time = 0U;
     if (DR16_instance.control_data.press_l)
     {
@@ -326,8 +330,8 @@ static void Gimbal_Target_Update(void)
             robot_cmd.Gyro_Position_Yaw = INS_Info.Yaw_TolAngle;
             robot_cmd.Velocity_Yaw = 0.0f;
             robot_cmd.Velocity_Pitch = 0.0f;
-         break;
-        case GIMBAL_RUNNING:
+        break;
+        case GIMBAL_RUNNING://2 * 2中输入方式 位控or速控 * 遥控器or键鼠
             if (robot_cmd.Control_mode == CONTROL_KEY_MOUSE)
             {
                 if(robot_cmd.use_position_control)
@@ -353,7 +357,7 @@ static void Gimbal_Target_Update(void)
 
             }
         break;
-        case GIMBAL_RUNNING_AIM:
+        case GIMBAL_RUNNING_AIM:// 自瞄做一个就近转位
             robot_cmd.Gyro_Position_Pitch = MiniPC_instance.receive_data.data.Ref_pitch;
             float yaw_diff = MiniPC_instance.receive_data.data.Ref_yaw - INS_Info.Yaw_Angle;
             int8_t round_offset = 0;
@@ -411,68 +415,94 @@ static void Rotate_Speed_Set(void)
 }
 
 /* ==================== 跟随模式旋转速度设置 ==================== */
-static void Follow_Rotate_Speed_Update(uint8_t gimbal_online_now)
+static void Follow_Rotate_Speed_Update(void)
 {
-    int32_t yaw_now;
-    int16_t yaw_offset;
-    float yaw_fdb;
-    float yaw_ref;
-    float yaw_rate;
-
-    if (!gimbal_online_now || gimbal.yaw_motor == NULL)
+    const int32_t follow_centers[2] = {Yaw_Mid_Front, Yaw_Mid_Back };
+    int32_t target_single = Yaw_Mid_Front;
+    /* MID_NONE: 方向就近归中 */
+    if (robot_cmd.Mid_mode == MID_NONE)
     {
-        robot_cmd.rotate_speed = 0.0f;
-        return;
+        int32_t min_abs_err = 8192;
+        for (uint8_t i = 0U; i < 2U; i++)
+        {
+            int32_t err = follow_centers[i] - gimbal.yaw_motor->Data.DJI_data.MechanicalAngle;
+            if (err > 4096)
+            {
+                err -= 8192;
+            }
+            else if (err < -4096)
+            {
+                err += 8192;
+            }
+            int32_t abs_err = (err >= 0) ? err : -err;
+            if (abs_err < min_abs_err)
+            {
+                min_abs_err = abs_err;
+                target_single = follow_centers[i];
+            }
+        }
     }
+    else if (robot_cmd.Mid_mode == MID_BACK)
+    {
+        target_single = Yaw_Mid_Back;
+    }
+    else
+    {
+        target_single = Yaw_Mid_Front;
+    }
+    // 进行一次快速归中，防止南辕北辙跳转
+    target_single = QuickCentering(gimbal.yaw_motor->Data.DJI_data.MechanicalAngle, target_single);
+    
+    PID_Control_Smis((float)target_single, (float)gimbal.yaw_motor->Data.DJI_data.MechanicalAngle, &Chassis_Rotate_PIDS, gimbal.yaw_motor->Data.DJI_data.SpeedFilter);
 
-    yaw_now = gimbal.yaw_motor->Data.DJI_data.Continuous_Mechanical_angle;
-
-    // 跟随模式默认对正前方，使用现有就近转位函数获取最短角度偏差。
-    yaw_offset = move_nearby_int16(Yaw_Mid_Front, gimbal.yaw_motor->Data.DJI_data.MechanicalAngle);
-
-    yaw_fdb = (float)yaw_now;
-    yaw_ref = (float)(yaw_now + yaw_offset);
-    yaw_rate = gimbal.yaw_motor->Data.DJI_data.SpeedFilter;
-
-    PID_Control_Smis(yaw_fdb, yaw_ref, &Chassis_Rotate_PIDS, yaw_rate);
-    PID_Control(yaw_rate, Chassis_Rotate_PIDS.pid_out, &Chassis_Rotate_PID);
-
-    robot_cmd.rotate_speed = limit(Chassis_Rotate_PID.pid_out,
-                                   (float)rotate_speed_MAX,
-                                   -(float)rotate_speed_MAX);
+    /* 跟随关系里机械角与底盘旋转通常为反号 */
+    robot_cmd.rotate_speed = -PID_Control(gimbal.yaw_motor->Data.DJI_data.SpeedFilter, Chassis_Rotate_PIDS.pid_out, &Chassis_Rotate_PID);
+    robot_cmd.rotate_speed = limit(robot_cmd.rotate_speed, (float)rotate_speed_MAX, -(float)rotate_speed_MAX);
 }
 
 /* ==================== 底盘通信更新 ==================== */
-static void Chassis_Comm_Update(uint8_t gimbal_online_now, uint8_t shoot_online_now)
+static void Chassis_Comm_Update()
 {
-    static const float LEVEL_GAIN = 2.0f;
+    static const float LEVEL_GAIN = 2.0f;// 控制时的速度增益
     static Chassis_speed_s slopeningV = {0};
     Chassis_speed_s planningV = {0};
-
+    //默认关闭
+    Gimbal_To_Chassis.Close_flag = 0U;
     if (can_comm_instance.can_comm_online_flag == 0U || can_comm_instance.can_comm == NULL || can_comm2 == NULL)
     {
         return;
     }
 
-    Gimabl_To_Chassis_Action.Gimbal_Online = gimbal_online_now;
-    Gimabl_To_Chassis_Action.Shoot_Online = shoot_online_now;
+    Gimabl_To_Chassis_Action.Gimbal_Online = robot_cmd.gimbal_mode != GIMBAL_DISABLED ? 1U : 0U;
+    Gimabl_To_Chassis_Action.Shoot_Online = robot_cmd.shoot_mode != SHOOT_DISABLED ? 1U : 0U;
     Gimabl_To_Chassis_Action.Vision_Online = MiniPC_instance.MiniPC_Online_Flag;
     Gimabl_To_Chassis_Action.Move_Status = (uint8_t)robot_cmd.chassis_mode;
     Gimabl_To_Chassis_Action.Shoot_Mode = (uint8_t)robot_cmd.shoot_mode;
-
+    Gimabl_To_Chassis_Action.Break_Limitation = robot_cmd.Unlimit_flag ? 1U : 0U;
     Gimbal_To_Chassis.Unlimit_flag = robot_cmd.Unlimit_flag ? 1U : 0U;
 
-    if (robot_cmd.robot_state == ROBOT_STOP || robot_cmd.chassis_mode == CHASSIS_DISABLED)
+    switch (robot_cmd.chassis_mode) 
     {
-        Gimbal_To_Chassis.vx = 0;
-        Gimbal_To_Chassis.vy = 0;
-        Gimbal_To_Chassis.rotate = 0;
-        Gimbal_To_Chassis.Unlimit_flag = 0U;
-        Gimbal_To_Chassis.Close_flag = 1U;
+        case CHASSIS_DISABLED:
+        case CHASSIS_STOP:
+            Gimbal_To_Chassis.vx = 0;
+            Gimbal_To_Chassis.vy = 0;
+            Gimbal_To_Chassis.rotate = 0;
+            Gimbal_To_Chassis.Unlimit_flag = 0U;
+            Gimbal_To_Chassis.Close_flag = 1U;;
+        break;
+        case CHASSIS_RUNNING_FOLLOW:
+        case CHASSIS_RUNNING_NORMAL:
+        case CHASSIS_RUNNING_SPIN:
+            // 其他模式在后续代码中更新速度
+        break;
+        default:
+            break;
+
     }
     else
     {
-        Gimbal_To_Chassis.Close_flag = 0U;
+
 
         if (robot_cmd.Control_mode == CONTROL_REMOTE)
         {
@@ -501,8 +531,8 @@ static void Chassis_Comm_Update(uint8_t gimbal_online_now, uint8_t shoot_online_
 
         if (robot_cmd.chassis_mode == CHASSIS_RUNNING_FOLLOW)
         {
-            Follow_Rotate_Speed_Update(gimbal_online_now);
-            planningV.Omega = limit(robot_cmd.rotate_speed / (float)rotate_speed_MAX, 1.0f, -1.0f);
+            Follow_Rotate_Speed_Update();
+            planningV.Omega = limit(robot_cmd.rotate_speed  , (float)rotate_speed_MAX, -(float)rotate_speed_MAX);
         }
 
         if (robot_cmd.chassis_mode == CHASSIS_RUNNING_SPIN)

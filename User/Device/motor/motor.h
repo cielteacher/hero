@@ -57,8 +57,7 @@ typedef enum
 
 int float_to_uint(float x, float x_min, float x_max, int bits);
 float uint_to_float(int X_int, float X_min, float X_max, int Bits);
-int16_t move_nearby_int16(uint16_t target_angle, uint16_t angle_now);
-float move_nearby_float(float target_angle, float angle_now);
+int16_t QuickCentering(int32_t Mch, uint16_t Exp) ;
 #endif // DEVICE_MOTOR_H
 
 

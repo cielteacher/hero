@@ -135,18 +135,18 @@ typedef enum {
  */
 typedef enum {
     CHASSIS_DISABLED = 0,     //!< 完全失能 (不执行任何控制)
-    CHASSIS_STOP,        //!< 停止
-    CHASSIS_RUNNING_FOLLOW,  //!< 跟随云台
-    CHASSIS_RUNNING_SPIN,    //!< 小陀螺
-    CHASSIS_RUNNING_NORMAL,  //!< 独立移动
+    CHASSIS_STOP = 1,        //!< 停止
+    CHASSIS_RUNNING_FOLLOW = 2,  //!< 跟随云台
+    CHASSIS_RUNNING_SPIN = 4,    //!< 小陀螺
+    CHASSIS_RUNNING_NORMAL = 8,  //!< 独立移动
 } ChassisState_e;
 
 /**
  * @brief 控制模式枚举
  */
 typedef enum {
-    CONTROL_REMOTE,    //!< 遥控器
-    CONTROL_KEY_MOUSE  //!< 键鼠
+    CONTROL_REMOTE = 0,    //!< 遥控器
+    CONTROL_KEY_MOUSE = 1  //!< 键鼠
 } ControlMode_e;
 
 /**

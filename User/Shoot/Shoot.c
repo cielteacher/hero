@@ -55,7 +55,7 @@ static uint8_t fire_step = 0U;
 static uint8_t fire_brake_ticks = 0U;
 static uint8_t keep_aim_after_fire = 0U;
 
-/* ============ ?????? ============ */
+/* ============ 内部函数 ============ */
 static void Shoot_Disable(void);
 static void Shoot_Stop(void);
 static void FricWheelControl(void);
@@ -67,7 +67,7 @@ static void PluckHold(void);
 static void HeatCheck(void);
 static void ResetShootState(void);
 
-/* ============ ??????? ============ */
+/* ============ 初始化函数 ============ */
 void Shoot_Init(void)
 {
     DJI_Motor_Config fric_config = {
@@ -105,7 +105,7 @@ void Shoot_Init(void)
     SingleFireReset();
 }
 
-/* ============ ????? ============ */
+/* ============ 控制函数 ============ */
 void Shoot_Control(void)
 {
     if (shoot.Pluck_motor == NULL || shoot.fric_motor_1 == NULL || shoot.fric_motor_2 == NULL ||
@@ -205,7 +205,7 @@ void Shoot_Control(void)
     }
 }
 
-/* ============ ????? ============ */
+/* ============ 控制函数 ============ */
 static void Shoot_Disable(void)
 {
     DJIMotordisable(shoot.fric_motor_1);
@@ -254,7 +254,7 @@ static void ResetShootState(void)
     PID_IoutReset(&Pluck_Speed_PID);
 }
 
-/* ============ ??????? ============ */
+/* ============ 卡弹检查函数 ============ */
 static void JamCheck(void)
 {
     static uint16_t jam_ticks = 0U;
@@ -340,7 +340,7 @@ static void PluckHold(void)
     DJI_Motor_CAN_TxMessage(shoot.Pluck_motor, tx);
 }
 
-/* ============ ??????????? ============ */
+/* ============ 单发射击函数 ============ */
 static void SingleFire(uint8_t keep_aim_mode)
 {
     float angle_err;

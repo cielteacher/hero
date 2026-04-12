@@ -13,23 +13,20 @@
     float offset = x_min;
     return (int) ((x-offset)*((float)((1<<bits)-1))/span);
 }
-//就近转位
-int16_t move_nearby_int16(uint16_t target_angle, uint16_t angle_now){
-    int16_t diff = target_angle - angle_now;
-    if (diff > 4000)
-        diff -= 8192;
-    if (diff < -4000)
-        diff += 8192;
-    return diff;
+/**
+ * @brief 角度差值计算，结果在[0, 8192)范围内
+ * @param target_angle 目标角度
+ * @param angle_now 当前角度
+ */
+int16_t QuickCentering(int32_t Mch, uint16_t Exp) 
+{
+    int16_t Exp_ = (Exp + 4095) % 8192;
+    if (Exp_ < Exp)
+        return Mch < Exp_ ? Exp - 8192 : Exp;
+    else
+        return Mch > Exp_ ? Exp + 8192 : Exp;
 }
- float move_nearby_float(float target_angle, float angle_now){
-    float diff = target_angle - angle_now;
-    if (diff > 4000.0f)
-        diff -= 8192.0f;
-    if (diff < -4000.0f)
-        diff += 8192.0f;
-    return diff;
-}
+
 
 
 
