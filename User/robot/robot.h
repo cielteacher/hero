@@ -173,13 +173,6 @@ typedef struct {
     eMidMode Mid_mode;              //!< 归中角度选择
     bool Speed_Up_flag;             //!< 加速标志
     bool Unlimit_flag;             //!< 解除功率限制标志 (底盘)
-    /* ===== 底盘控制 ===== */
-    float rotate_feedforward;       //!< 小陀螺前馈 (由底盘陀螺仪反馈)
-    float rotate_speed;             //!< 底盘旋转速度
-    /* ===== 云台控制 ===== */
-    bool use_position_control;       //!< 云台是否使用位置控制 (否则使用速度控制)
-    float Velocity_Yaw;    //!< Yaw角速度目标 (deg/s, 仅在speed模式使用)
-    float Velocity_Pitch;  //!< Pitch角速度目标 (deg/s, 仅在speed模式使用)
     /* ===== 云台陀螺仪参考 (IMU坐标系) ===== */
     float Gyro_Position_Yaw;                 //!< Yaw目标位置 (度, 连续累计)
     float Gyro_Position_Pitch;               //!< Pitch目标位置 (度, -180~180)
