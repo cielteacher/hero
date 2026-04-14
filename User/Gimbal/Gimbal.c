@@ -18,10 +18,9 @@
 Gimbal_t gimbal = {0};
 extern Robot_ctrl_cmd_t robot_cmd;
 
-#define CENTER_STABLE_TICKS      200U
+#define CENTER_STABLE_TICKS    200U
 #define CENTER_YAW_DEADBAND  0.1f
 #define CENTER_PITCH_DEADBAND 0.1f
-#define GIMBAL_STOP_SPEED_DEADBAND        2.0f
 #define GIMBAL_STOP_OUT_MAX               14000.0f
 
 uint8_t power_on_center_flag = 0U;
@@ -77,8 +76,8 @@ static PID Pitch_Speed_PID[4] = {
 };
 
 /* ==================== 内部函数声明 ==================== */
-static void Gimbal_Disable(void);
 static void Gimbal_Stop(void);
+static void Gimbal_Disable(void);
 static void ResetGimbalPidIout(void);
 static void Pitch_Limit(void);
 /* ==================== Pitch 限位 ==================== */
@@ -188,10 +187,10 @@ void Gimbal_Control(void)
     {   // 计算前馈 防止云台跟随底盘转动
         FeedForward_Calc(&GimbalYaw_FF, can_comm_instance.can_comm_rx_data.chassis_gyro);
 
-        PID_Control_Smis(INS_Info.Yaw_TolAngle, MiniPC_instance.receive_data.data.Ref_yaw, &Yaw_Pos_PID[PID_AIM], INS_Info.Yaw_Gyro);
+        PID_Control_Smis(INS_Info.Yaw_TolAngle, robot_cmd.Gyro_Position_Yaw, &Yaw_Pos_PID[PID_AIM], INS_Info.Yaw_Gyro);
         PID_Control(INS_Info.Yaw_Gyro, Yaw_Pos_PID[PID_AIM].pid_out, &Yaw_Speed_PID[PID_AIM]);
 
-        PID_Control_Smis(INS_Info.Pitch_Angle,MiniPC_instance.receive_data.data.Ref_pitch,&Pitch_Pos_PID[PID_AIM],gimbal.pitch_motor->Data.DJI_data.SpeedFilter);
+        PID_Control_Smis(INS_Info.Pitch_Angle,robot_cmd.Gyro_Position_Pitch,&Pitch_Pos_PID[PID_AIM], INS_Info.Pitch_Gyro);
         PID_Control(INS_Info.Pitch_Gyro, Pitch_Pos_PID[PID_AIM].pid_out, &Pitch_Speed_PID[PID_AIM]);
 
         can_send[0] = (int16_t)Pitch_Speed_PID[PID_AIM].pid_out;
@@ -212,6 +211,7 @@ void Gimbal_Control(void)
         can_send[1] = (int16_t)Yaw_Speed_PID[PID_AIM].pid_out;
         DM_Motor_DJI_CAN_TxMessage(gimbal.yaw_motor, can_send);
         break;
+    }
     default:
         Gimbal_Stop();
         return;
@@ -229,26 +229,14 @@ static void Gimbal_Disable(void)
 static void Gimbal_Stop(void)
 {
     int16_t can_send[4] = {0};
-    float yaw_speed = gimbal.yaw_motor->Data.DJI_data.SpeedFilter;
-    float pitch_speed = gimbal.pitch_motor->Data.DJI_data.SpeedFilter;
-
     // 停止态语义为急停：速度环目标置 0，由 PID 闭环主动制动。
-    PID_Control(yaw_speed, 0.0f, &Yaw_Speed_PID[]);
-    PID_Control(pitch_speed, 0.0f, &Pitch_Speed_PID[GIMBAL_STOP_PID_MODE]);
+    PID_Control( gimbal.yaw_motor->Data.DJI_data.SpeedFilter, 0.0f, &Yaw_Speed_PID[PID_MECH]);
+    PID_Control(gimbal.pitch_motor->Data.DJI_data.SpeedFilter, 0.0f, &Pitch_Speed_PID[PID_MECH]);
 
-    if (fabsf(yaw_speed) <= GIMBAL_STOP_SPEED_DEADBAND)
-    {
-        Yaw_Speed_PID[GIMBAL_STOP_PID_MODE].pid_out = 0.0f;
-    }
-    if (fabsf(pitch_speed) <= GIMBAL_STOP_SPEED_DEADBAND)
-    {
-        Pitch_Speed_PID[GIMBAL_STOP_PID_MODE].pid_out = 0.0f;
-    }
-
-    can_send[0] = (int16_t)limit(Pitch_Speed_PID[GIMBAL_STOP_PID_MODE].pid_out,
+    can_send[0] = (int16_t)limit(Pitch_Speed_PID[PID_MECH].pid_out,
                                  GIMBAL_STOP_OUT_MAX,
                                  -GIMBAL_STOP_OUT_MAX);
-    can_send[1] = (int16_t)limit(Yaw_Speed_PID[GIMBAL_STOP_PID_MODE].pid_out,
+    can_send[1] = (int16_t)limit(Yaw_Speed_PID[PID_MECH].pid_out,
                                  GIMBAL_STOP_OUT_MAX,
                                  -GIMBAL_STOP_OUT_MAX);
 

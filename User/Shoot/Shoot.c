@@ -1,16 +1,17 @@
 /**
  * @file    Shoot.c
- * @brief   ???????????
- * @note    1ms??????????????
+ * @brief   ÂèëÂ∞ÑÊéßÂà∂Â±Ç - Êë©Êì¶ËΩÆ„ÄÅÊã®ÂºπÁõò„ÄÅÂç°ÂºπÊÅ¢Â§ç
  */
 #include "Shoot.h"
 #include "MiniPC.h"
 #include "can_comm.h"
 #include "robot.h"
+#include <math.h>
 
 Shoot_t shoot = {0};
 extern Robot_ctrl_cmd_t robot_cmd;
 
+/* ==================== ÂèëÂ∞ÑÂèÇÊï∞ ==================== */
 #define FRIC_PID_INIT                                                                                 \
     {                                                                                                 \
         .Kp = 7.0f, .Ki = 0.0f, .Kd = 0.0f, .interlimit = 3000, .outlimit = 16000, .DeadBand = 0.50f, \
@@ -22,6 +23,7 @@ extern Robot_ctrl_cmd_t robot_cmd;
 #define SINGLE_FIRE_BRAKE_MAX_CYCLES 5U
 #define SINGLE_FIRE_BRAKE_SPEED_TH 20.0f
 
+/* ==================== ÂÖ®Â±Ä/ÈùôÊÄÅÂèòÈáè ==================== */
 static PID Fric_Speed_PID[4] = {
     FRIC_PID_INIT,
     FRIC_PID_INIT,
@@ -54,20 +56,24 @@ static PID Pluck_Speed_PID = {
 static uint8_t fire_step = 0U;
 static uint8_t fire_brake_ticks = 0U;
 static uint8_t keep_aim_after_fire = 0U;
+static uint16_t auto_fire_tick = 0U;
+static uint16_t jam_ticks = 0U;
+static Jam_State_e jam_state = JAM_IDLE;
+static float jam_target_angle = 0.0f;
+static uint16_t jam_timer = 0U;
 
-/* ============ ƒ⁄≤ø∫Ø ˝ ============ */
+/* ==================== ÂÜÖÈÉ®ÂáΩÊï∞Â£∞Êòé ==================== */
 static void Shoot_Disable(void);
 static void Shoot_Stop(void);
 static void FricWheelControl(void);
 static void SingleFire(uint8_t keep_aim_mode);
-static void SingleFireReset(void);
 static void JamCheck(void);
 static void JamHandle(void);
 static void PluckHold(void);
 static void HeatCheck(void);
 static void ResetShootState(void);
 
-/* ============ ≥ı ºªØ∫Ø ˝ ============ */
+/* ==================== Êú∫Âô®‰∫∫ÂàùÂßãÂåñ ==================== */
 void Shoot_Init(void)
 {
     DJI_Motor_Config fric_config = {
@@ -100,12 +106,10 @@ void Shoot_Init(void)
     shoot.Pluck_motor = DJI_Motor_Init(&pluck_config);
 
     robot_cmd.shoot_mode = SHOOT_STOP;
-    shoot.pluck_target_angle = 0;
-    shoot.pluck_lock = 0;
-    SingleFireReset();
+    ResetShootState();
 }
 
-/* ============ øÿ÷∆∫Ø ˝ ============ */
+/* ==================== ÂèëÂ∞Ñ‰∏ªÊéßÂà∂ ==================== */
 void Shoot_Control(void)
 {
     if (shoot.Pluck_motor == NULL || shoot.fric_motor_1 == NULL || shoot.fric_motor_2 == NULL ||
@@ -120,12 +124,19 @@ void Shoot_Control(void)
         return;
     }
 
+    if (robot_cmd.shoot_mode != SHOOT_AIM)
+    {
+        auto_fire_tick = 0U;
+    }
+
     HeatCheck();
     JamCheck();
 
     if (robot_cmd.shoot_mode != SHOOT_FIRE && robot_cmd.shoot_mode != SHOOT_AIM)
     {
-        SingleFireReset();
+        fire_step = 0U;
+        fire_brake_ticks = 0U;
+        keep_aim_after_fire = 0U;
     }
 
     switch (robot_cmd.shoot_mode)
@@ -150,9 +161,9 @@ void Shoot_Control(void)
             txbuffer[i] = (int16_t)Fric_Speed_PID[i].pid_out;
         }
         DJI_Motor_CAN_TxMessage(shoot.fric_motor_1, txbuffer);
-    }
         PluckHold();
         break;
+    }
 
     case SHOOT_READY:
     case SHOOT_CHECKOUT:
@@ -168,12 +179,8 @@ void Shoot_Control(void)
         break;
 
     case SHOOT_AIM:
-    {
-        static uint16_t auto_fire_tick = 0U;
         FricWheelControl();
-
-        if (MiniPC_instance.MiniPC_Online_Flag &&
-            MiniPC_instance.receive_data.data.dis <= 0.2f)
+        if (MiniPC_instance.MiniPC_Online_Flag && MiniPC_instance.receive_data.data.dis <= 0.2f)
         {
             auto_fire_tick++;
             if (auto_fire_tick >= 80U)
@@ -192,7 +199,6 @@ void Shoot_Control(void)
             PluckHold();
         }
         break;
-    }
 
     case SHOOT_STUCKING:
         FricWheelControl();
@@ -205,7 +211,7 @@ void Shoot_Control(void)
     }
 }
 
-/* ============ øÿ÷∆∫Ø ˝ ============ */
+/* ==================== ÂÅúÊ≠¢/Â§±ËÉΩ ==================== */
 static void Shoot_Disable(void)
 {
     DJIMotordisable(shoot.fric_motor_1);
@@ -226,9 +232,7 @@ static void Shoot_Stop(void)
         shoot.fric_motor_4,
     };
     int16_t txbuffer[4] = {0};
-    int16_t tx[4] = {0};
 
-    // ????????????????????0??????
     for (uint8_t i = 0; i < 4; i++)
     {
         PID_Control(fric_motors[i]->Data.SpeedFilter, 0.0f, &Fric_Speed_PID[i]);
@@ -236,16 +240,23 @@ static void Shoot_Stop(void)
     }
     DJI_Motor_CAN_TxMessage(shoot.fric_motor_1, txbuffer);
 
-    tx[0] = 0;
-    DJI_Motor_CAN_TxMessage(shoot.Pluck_motor, tx);
+    DJI_Motor_CAN_TxMessage(shoot.Pluck_motor, (int16_t[4]){0});
 
     ResetShootState();
 }
 
 static void ResetShootState(void)
 {
-    SingleFireReset();
+    fire_step = 0U;
+    fire_brake_ticks = 0U;
+    keep_aim_after_fire = 0U;
+    auto_fire_tick = 0U;
+    jam_ticks = 0U;
+    jam_state = JAM_IDLE;
+    jam_target_angle = 0.0f;
+    jam_timer = 0U;
     shoot.pluck_lock = 0U;
+    shoot.pluck_target_angle = 0;
 
     for (uint8_t i = 0; i < 4; i++)
     {
@@ -254,12 +265,11 @@ static void ResetShootState(void)
     PID_IoutReset(&Pluck_Speed_PID);
 }
 
-/* ============ ø®µØºÏ≤È∫Ø ˝ ============ */
+/* ==================== Â†µÂ°ûÊ£ÄÊü• ==================== */
 static void JamCheck(void)
 {
-    static uint16_t jam_ticks = 0U;
-
-    if (robot_cmd.shoot_mode == SHOOT_FIRE || robot_cmd.shoot_mode == SHOOT_AIM)
+    if (robot_cmd.shoot_mode == SHOOT_FIRE ||
+        (robot_cmd.shoot_mode == SHOOT_AIM && fire_step != 0U))
     {
         if (fabsf(shoot.Pluck_motor->Data.SpeedFilter) <= 50.0f ||
             fabsf(shoot.Pluck_motor->Data.CurrentFilter) >= 5000.0f)
@@ -267,6 +277,7 @@ static void JamCheck(void)
             jam_ticks++;
             if (jam_ticks >= UNJAM_TIME)
             {
+                jam_ticks = 0U;
                 robot_cmd.shoot_mode = SHOOT_STUCKING;
             }
         }
@@ -281,6 +292,7 @@ static void JamCheck(void)
     }
 }
 
+/* ==================== ÁÉ≠ÈáèÊ£ÄÊü• ==================== */
 static void HeatCheck(void)
 {
     uint16_t remain;
@@ -299,7 +311,6 @@ static void HeatCheck(void)
     cooling_rate = can_comm_instance.can_comm_rx_data.shoot_barrel_cooling;
     heat_margin = (float)remain + cooling_rate * 0.001f;
 
-    // ?????????????????
     if (robot_cmd.shoot_mode == SHOOT_COOLING)
     {
         if (heat_margin >= cool_exit_threshold)
@@ -318,6 +329,7 @@ static void HeatCheck(void)
     }
 }
 
+/* ==================== Êã®ÂºπÁõòÊéßÂà∂ ==================== */
 static void PluckHold(void)
 {
     int16_t tx[4] = {0};
@@ -340,13 +352,12 @@ static void PluckHold(void)
     DJI_Motor_CAN_TxMessage(shoot.Pluck_motor, tx);
 }
 
-/* ============ µ•∑¢…‰ª˜∫Ø ˝ ============ */
+/* ==================== ÂçïÂèëÊéßÂà∂ ==================== */
 static void SingleFire(uint8_t keep_aim_mode)
 {
     float angle_err;
     int16_t tx[4] = {0};
 
-    // ??0??????????
     if (fire_step == 0U)
     {
         shoot.pluck_target_angle = shoot.Pluck_motor->Data.Continuous_Mechanical_angle + PLUCK_SINGLE_ANGLE;
@@ -356,7 +367,6 @@ static void SingleFire(uint8_t keep_aim_mode)
         return;
     }
 
-    // ??1???????????
     if (fire_step == 1U)
     {
         PID_Control_Smis(shoot.Pluck_motor->Data.Continuous_Mechanical_angle,
@@ -379,10 +389,10 @@ static void SingleFire(uint8_t keep_aim_mode)
         return;
     }
 
-    // ??2?????????????
     if (fire_step == 2U)
     {
         float brake_output = -shoot.Pluck_motor->Data.SpeedFilter * 65.0f;
+
         tx[0] = (int16_t)limit(brake_output, 15000.0f, -15000.0f);
         DJI_Motor_CAN_TxMessage(shoot.Pluck_motor, tx);
 
@@ -399,14 +409,7 @@ static void SingleFire(uint8_t keep_aim_mode)
     }
 }
 
-static void SingleFireReset(void)
-{
-    fire_step = 0U;
-    fire_brake_ticks = 0U;
-    keep_aim_after_fire = 0U;
-}
-
-/* ============ ????? ============ */
+/* ==================== Êë©Êì¶ËΩÆÊéßÂà∂ ==================== */
 static void FricWheelControl(void)
 {
     static const float fric_targets[4] = {
@@ -434,27 +437,23 @@ static void FricWheelControl(void)
     DJI_Motor_CAN_TxMessage(shoot.fric_motor_1, txbuffer);
 }
 
-/* ============ ??????? ============ */
+/* ==================== Âç°ÂºπÂ§ÑÁêÜ ==================== */
 static void JamHandle(void)
 {
-    static Jam_State_e jam_state = JAM_IDLE;
-    static float target_angle = 0.0f;
-    static uint16_t timer = 0U;
     float current_angle = (float)shoot.Pluck_motor->Data.Continuous_Mechanical_angle;
     int16_t tx[4] = {0};
 
     switch (jam_state)
     {
     case JAM_IDLE:
-        target_angle = current_angle - PLUCK_SINGLE_ANGLE * 0.7f;
-        timer = 0U;
+        jam_target_angle = current_angle - PLUCK_SINGLE_ANGLE * 0.7f;
+        jam_timer = 0U;
         jam_state = JAM_BACKWARD;
         break;
 
     case JAM_BACKWARD:
-        // ?????????????
         PID_Control_Smis(current_angle,
-                         target_angle,
+                         jam_target_angle,
                          &Pluck_Place_PID,
                          shoot.Pluck_motor->Data.SpeedFilter);
         PID_Control(shoot.Pluck_motor->Data.SpeedFilter,
@@ -463,28 +462,26 @@ static void JamHandle(void)
         tx[0] = (int16_t)limit(Pluck_Speed_PID.pid_out, 15000.0f, -15000.0f);
         DJI_Motor_CAN_TxMessage(shoot.Pluck_motor, tx);
 
-        if (fabsf(current_angle - target_angle) < 2.0f)
+        if (fabsf(current_angle - jam_target_angle) < 2.0f)
         {
-            timer = 0U;
+            jam_timer = 0U;
             jam_state = JAM_WAIT;
         }
         break;
 
     case JAM_WAIT:
-        tx[0] = 0;
-        DJI_Motor_CAN_TxMessage(shoot.Pluck_motor, tx);
-        timer++;
-        if (timer > 100U)
+        DJI_Motor_CAN_TxMessage(shoot.Pluck_motor, (int16_t[4]){0});
+        jam_timer++;
+        if (jam_timer > 100U)
         {
-            target_angle = current_angle + PLUCK_SINGLE_ANGLE;
+            jam_target_angle = current_angle + PLUCK_SINGLE_ANGLE;
             jam_state = JAM_FORWARD;
         }
         break;
 
     case JAM_FORWARD:
-        // ???????????????
         PID_Control_Smis(current_angle,
-                         target_angle,
+                         jam_target_angle,
                          &Pluck_Place_PID,
                          shoot.Pluck_motor->Data.SpeedFilter);
         PID_Control(shoot.Pluck_motor->Data.SpeedFilter,
@@ -493,9 +490,10 @@ static void JamHandle(void)
         tx[0] = (int16_t)limit(Pluck_Speed_PID.pid_out, 15000.0f, -15000.0f);
         DJI_Motor_CAN_TxMessage(shoot.Pluck_motor, tx);
 
-        if (fabsf(current_angle - target_angle) < 2.0f)
+        if (fabsf(current_angle - jam_target_angle) < 2.0f)
         {
             jam_state = JAM_IDLE;
+            jam_ticks = 0U;
             robot_cmd.shoot_mode = SHOOT_READY;
         }
         break;
