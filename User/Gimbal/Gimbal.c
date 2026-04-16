@@ -1,6 +1,6 @@
 ﻿/**
  * @file    Gimbal.c
- * @brief   云台执行层 - 电机PID控制
+ * @brief   云台执行层，执行cmd文件的指令 - 电机PID控制
  */
 #include "Gimbal.h"
 #include "PID.h"

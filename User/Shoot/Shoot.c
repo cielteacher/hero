@@ -1,6 +1,6 @@
 /**
  * @file    Shoot.c
- * @brief   发射控制层 - 摩擦轮、拨弹盘、卡弹恢复
+ * @brief   发射控制层 - (摩擦轮、拨弹盘、卡弹恢复)执行cmd文件有挂u你发射机构的指令
  */
 #include "Shoot.h"
 #include "MiniPC.h"
