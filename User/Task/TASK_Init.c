@@ -27,5 +27,6 @@ void Task_init(void)
 	Robot_Init();
 	Can_Init();    // can初始化
 	BMI088_Init(); // 陀螺仪初始化
+  Can_Comm_Init();// 板间通信初始化
   vTaskDelete(NULL);   // 删除开始空闲任务
 }

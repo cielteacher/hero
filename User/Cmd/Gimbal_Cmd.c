@@ -3,7 +3,6 @@
  * @brief   云台决策层 - 模式决策、目标更新、板间通信
  */
 #include "Gimbal_Cmd.h"
-#include "Gimbal.h"
 #include "PID.h"
 #include "arm_math.h"
 #include "bsp_fdcan.h"
@@ -14,7 +13,6 @@
 
 /* ==================== 全局/静态变量 ==================== */
 Robot_ctrl_cmd_t robot_cmd = {0};
-static CANInstance *can_comm2; // 底盘数据发送id120的数据包
 static Slope_s slope_X, slope_Y, slope_Omega; // 底盘速度规划
 Chassis_speed_s planningV = {0.0f, 0.0f, 0.0f};// 目标速度输出
 Chassis_speed_s slopeningV = {0.0f, 0.0f, 0.0f};// 斜坡限幅输出
@@ -72,15 +70,15 @@ static uint8_t CheckGimbalOnline(void)
  */
 static uint8_t CheckShootOnline(void)
 {
-    if (shoot.Pluck_motor == NULL || shoot.fric_motor_1 == NULL || shoot.fric_motor_2 == NULL ||
-        shoot.fric_motor_3 == NULL || shoot.fric_motor_4 == NULL)
+    if (shoot.Pluck_motor == NULL || shoot.fric_motor_LF == NULL || shoot.fric_motor_RF == NULL ||
+        shoot.fric_motor_LB == NULL || shoot.fric_motor_RB == NULL)
     {
         robot_cmd.shoot_mode = SHOOT_DISABLED;
         return 0U;
     }
-    if(!shoot.Pluck_motor->dji_motor_online_flag || !shoot.fric_motor_1->dji_motor_online_flag ||
-       !shoot.fric_motor_2->dji_motor_online_flag || !shoot.fric_motor_3->dji_motor_online_flag ||
-       !shoot.fric_motor_4->dji_motor_online_flag)
+    if(!shoot.Pluck_motor->dji_motor_online_flag || !shoot.fric_motor_LF->dji_motor_online_flag ||
+       !shoot.fric_motor_RF->dji_motor_online_flag || !shoot.fric_motor_LB->dji_motor_online_flag ||
+       !shoot.fric_motor_RB->dji_motor_online_flag)
     {
         robot_cmd.shoot_mode = SHOOT_DISABLED;
         return 0U;
@@ -104,18 +102,10 @@ static uint8_t VisionCanAutoAim(void)
 /* ==================== 机器人初始化 ==================== */
 void Robot_Init(void)
 {
-    CAN_Init_Config_s can_comm2_config = {
-        .can_handle = &hfdcan2,
-        .tx_id = 0x120,
-        .rx_id = 0,
-        .rx_len = 8,
-    };
     // 初始化斜坡限幅器
     Slope_Init(&slope_X, 0.006f, 0.08f, SLOPE_FIRST_REAL);
     Slope_Init(&slope_Y, 0.006f, 0.08f, SLOPE_FIRST_REAL);
     Slope_Init(&slope_Omega, 3.0f * PI / 1000.0f, 30.0f * PI / 1000.0f, SLOPE_FIRST_REAL);
-
-    can_comm2 = CANRegister(&can_comm2_config);
     // 初始化状态为停止
     robot_cmd.robot_state = ROBOT_STOP;
     robot_cmd.chassis_mode = CHASSIS_STOP;
@@ -124,7 +114,7 @@ void Robot_Init(void)
     robot_cmd.Gyro_Position_Yaw = INS_Info.Yaw_TolAngle;
     Gimbal_Init();
     Shoot_Init();
-    Can_Comm_Init();
+
 }
 
 /* ==================== 机器人状态更新 ==================== */
@@ -184,6 +174,7 @@ void Robot_Update(void)
     Chassis_Comm_Update();
 }
 // ==================== 模式更新 键鼠+遥控器 具体云台转动再gimbal函数处理 ====================
+// 注意 这里只做状态更新 不做任何控制输出和目标设定
 /*
  *@brief 处理遥控器输入，更新机器人控制命令
  * fn1=1时进入发射准备状态，
@@ -211,11 +202,10 @@ static void RCUpdate(void)
             robot_cmd.shoot_mode = SHOOT_FIRE;
         }
     }
-    // 注意 这一段在底盘数据更新那个函数里面
-    // if(DR16_instance.control_data.wheel)
-    // {
-    //     robot_cmd.rotate_speed = DR16_instance.control_data.wheel * rotate_speed_MAX;
-    // }
+    else
+    {
+        robot_cmd.shoot_mode = SHOOT_READY_NOFRIC;
+    }
 }
 
 /**
@@ -230,8 +220,7 @@ static void RCUpdate(void)
  * Q键按 住 时进入小陀螺模式
  * 长按鼠标右键开启自瞄（自瞄可以识别则自瞄算法接管云台+发射机构反之，操作手位控云台）
                  （此时底盘默认为分离模式提高精度，但如果开启小陀螺还是小陀螺优先）
- * 鼠标左键开火（如果摩擦轮已开）如果未开，将开启并在延迟一段时间（等待摩擦轮上速）后发射
- * 鼠标左键长按（500ms）也只会开火一次
+ * 鼠标左键开火（如果摩擦轮达到目标速度）如果未达到目标速度，将开启并在延迟一段时间（等待摩擦轮上速）后发射
 */
 static void KMUpdate(void)
 {
@@ -299,33 +288,23 @@ static void KMUpdate(void)
         robot_cmd.Mid_mode = MID_FRONT;
     }
     // 左键控制 开火
-    static uint16_t speed_up_time = 0U;
-    if (DR16_instance.control_data.press_l)
+    if (!DR16_instance.control_data.last_mouse_press_l&&DR16_instance.control_data.press_l)
     {
-        if(DR16_instance.control_data.long_press_l)
-        {
-            fric_toggle = 1U;
-            speed_up_time = 0U;
-            robot_cmd.shoot_mode = SHOOT_READY;
-            return;
-        // 长按鼠标左键时仅开启摩擦轮，不触发连续射击（因为长按阈值时500ms）因此只射击一次
-        }
-        if(fric_toggle)
+        if(fric_toggle && CheckFricSpeedReady())
         {
              robot_cmd.shoot_mode = SHOOT_FIRE;
         }
         else
         {
             fric_toggle = 1U;
-            speed_up_time++;
-            if(speed_up_time >= FRIC_SPEED_UP_TIME)
+            if(CheckFricSpeedReady())
             {
                 robot_cmd.shoot_mode = SHOOT_FIRE;
-                speed_up_time = 0U;
+
             }
         }
     }
-    else{speed_up_time = 0U;}
+
 }
 
 /* ==================== 云台目标更新 ==================== */
@@ -342,11 +321,11 @@ static void Gimbal_Target_Update(void)
             robot_cmd.Gyro_Position_Pitch = INS_Info.Pitch_Angle;
             robot_cmd.Gyro_Position_Yaw = INS_Info.Yaw_TolAngle;
         break;
-        case GIMBAL_RUNNING://2 * 2中输入方式 位控or速控 * 遥控器or键鼠
+        case GIMBAL_RUNNING://  遥控器or键鼠
             if (robot_cmd.Control_mode == CONTROL_KEY_MOUSE)
             {
-                robot_cmd.Gyro_Position_Pitch +=  DR16_instance.control_data.x / (float)MOUSE_MAX * MOUSE_YAW_SENSITIVITY;
-                robot_cmd.Gyro_Position_Yaw +=  DR16_instance.control_data.y / (float)MOUSE_MAX * MOUSE_PITCH_SENSITIVITY;
+                robot_cmd.Gyro_Position_Pitch += DR16_instance.control_data.y / (float)MOUSE_MAX * MOUSE_PITCH_SENSITIVITY;
+                robot_cmd.Gyro_Position_Yaw +=   DR16_instance.control_data.x / (float)MOUSE_MAX * MOUSE_YAW_SENSITIVITY;
             }
             else if (robot_cmd.Control_mode == CONTROL_REMOTE)
             {
@@ -467,8 +446,7 @@ static void Chassis_Comm_Update()
 {
     static const float LEVEL_GAIN = 2.0f;// 控制时的速度增益
     static Gimbal_board_send_t Gimbal_To_Chassis;// 每次更新前先清空发送结构体，防止未赋值项的垃圾数据干扰底盘控制
-    static Gimbal_action_t Gimabl_To_Chassis_Action;
-    if (can_comm_instance.can_comm_online_flag == 0U || can_comm_instance.can_comm == NULL || can_comm2 == NULL )
+    if (can_comm_instance.can_comm_online_flag == 0U || can_comm_instance.can_comm == NULL)
     {
         return;
     }
@@ -477,15 +455,11 @@ static void Chassis_Comm_Update()
     planningV.Y = 0.0f;
     planningV.Omega = 0.0f;
 
-    Gimabl_To_Chassis_Action.Gimbal_Online = robot_cmd.gimbal_mode != GIMBAL_DISABLED ? 1U : 0U;
-    Gimabl_To_Chassis_Action.Shoot_Online = robot_cmd.shoot_mode != SHOOT_DISABLED ? 1U : 0U;
-    Gimabl_To_Chassis_Action.Vision_Online = MiniPC_instance.MiniPC_Online_Flag;
-    Gimabl_To_Chassis_Action.Move_Status = (uint8_t)robot_cmd.chassis_mode;
-    Gimabl_To_Chassis_Action.Shoot_Mode = (uint8_t)robot_cmd.shoot_mode;
-    Gimabl_To_Chassis_Action.Break_Limitation = robot_cmd.Unlimit_flag ? 1U : 0U;
-
-    Gimbal_To_Chassis.Unlimit_flag = robot_cmd.Unlimit_flag ? 1U : 0U;
-    Gimbal_To_Chassis.Close_flag = 0U;
+    Gimbal_To_Chassis.flag.bits.Gimbal_Online = robot_cmd.gimbal_mode != GIMBAL_DISABLED ? 1U : 0U;
+    Gimbal_To_Chassis.flag.bits.Shoot_Online = robot_cmd.shoot_mode != SHOOT_DISABLED ? 1U : 0U;
+    Gimbal_To_Chassis.flag.bits.Vision_Online = MiniPC_instance.MiniPC_Online_Flag;
+    Gimbal_To_Chassis.flag.bits.Unlimit_flag = robot_cmd.Unlimit_flag ? 1U : 0U;
+    Gimbal_To_Chassis.flag.bits.Close_flag = 0U;
 
     switch (robot_cmd.chassis_mode) 
     {
@@ -494,8 +468,8 @@ static void Chassis_Comm_Update()
             Gimbal_To_Chassis.vx = 0;
             Gimbal_To_Chassis.vy = 0;
             Gimbal_To_Chassis.rotate = 0;
-            Gimbal_To_Chassis.Unlimit_flag = 0U;
-            Gimbal_To_Chassis.Close_flag = 1U;
+            Gimbal_To_Chassis.flag.bits.Unlimit_flag = 0U;
+            Gimbal_To_Chassis.flag.bits.Close_flag = 1U;
             // 进入停止状态时重置斜坡规划，防止再次启动时的速度突变
             Slope_Reset(&slope_X, 0.0f);
             Slope_Reset(&slope_Y, 0.0f);   
@@ -588,7 +562,6 @@ static void Chassis_Comm_Update()
         Gimbal_To_Chassis.rotate = (int16_t)(slopeningV.Omega * 2000.0f);
     
     chassis_send:
-    Gimabl_To_Chassis_Action.Break_Limitation = Gimbal_To_Chassis.Unlimit_flag;
     CAN_Send(can_comm_instance.can_comm, (uint8_t *)&Gimbal_To_Chassis, 10.0f);
-    CAN_Send(can_comm2, (uint8_t *)&Gimabl_To_Chassis_Action, 10.0f);
+
 }

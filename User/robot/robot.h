@@ -75,7 +75,43 @@
 
 /* ============ 底盘参数 ============ */
 #define rotate_speed_MAX 4000           //!< 最大旋转速度
-
+#define WHEEL_LF 0              //!< 左前轮索引
+#define WHEEL_RF 1              //!< 右前轮索引
+#define WHEEL_LB 2              //!< 左后轮索引
+#define WHEEL_RB 3              //!< 右后轮索引
+/*============  板间通信定义  ============*/
+// 云台->底盘数据包
+#pragma pack(1) // 压缩结构体,取消字节对齐
+typedef union
+{
+  uint8_t raw;
+  struct {
+      uint8_t Close_flag        : 1;
+      uint8_t Unlimit_flag      : 1;
+      uint8_t Gimbal_Online     : 1;
+      uint8_t Shoot_Online      : 1;
+      uint8_t Vision_Online     : 1;
+      uint8_t Reserve1          : 1;
+      uint8_t Reserve2          : 1;
+      uint8_t Reserve3          : 1;
+    } bits;
+}Gimbal_Flag;
+typedef struct  {
+    int16_t vx;            	// 单位 基准速度的倍率（基准速度由底盘模块根据功率自动计算）
+    int16_t vy;            	// 单位 基准速度的倍率
+    int16_t rotate;        	// 单位 旋转速度度每秒
+	  Gimbal_Flag flag;	   	//!< @brief 底盘关闭标志位
+    uint8_t Chassis_Mode;     //!< @brief 底盘模式
+} Gimbal_board_send_t;
+// 云台<-底盘数据包
+typedef struct {
+  int16_t chassis_gyro;  // 将底盘主控的imu数据发到云台
+  int16_t chassis_slop;  // 底盘所在斜坡倾角
+  uint8_t game_progress; // 比赛状态
+uint16_t heat_limit_remain;   // 剩余热量
+uint8_t shoot_barrel_cooling; // 枪口热量冷却值
+} Chassis_board_send_t;
+#pragma pack()
 /* ============ 数据结构定义 ============ */
 
 /**
@@ -158,7 +194,7 @@ typedef enum {
     MID_BACK = 2,   //!< 后方归中
 } eMidMode;
 
-
+#ifdef GIMBAL_BOARD
 /**
  * @brief 机器人控制命令结构体
  * @note  全局共享，由Gimbal_Cmd.c决策层更新，Gimbal.c/Shoot.c执行层读取
@@ -178,5 +214,18 @@ typedef struct {
     float Gyro_Position_Pitch;               //!< Pitch目标位置 (度, -180~180)
 
 } Robot_ctrl_cmd_t;
+#endif
 
+#ifdef CHASSIS_BOARD
+/**
+ * @brief 底盘板控制命令结构体
+ * @note  全局共享，由Chassis_Cmd.c决策层更新，Chassis.c执行层读取
+ */
+typedef struct {
+    /* ===== 状态模式 ===== */
+    ChassisState_e chassis_mode;    //!< 底盘模式
+
+
+} Chassis_board_cmd_t;
+#endif
 #endif /* __ROBOT_H */

@@ -7,6 +7,7 @@
 #include "can_comm.h"
 #include "robot.h"
 #include <math.h>
+#include <stdint.h>
 
 Shoot_t shoot = {0};
 extern Robot_ctrl_cmd_t robot_cmd;
@@ -53,15 +54,14 @@ static PID Pluck_Speed_PID = {
     .inter_threUp = 5000,
 };
 
-static uint8_t fire_step = 0U;
-static uint8_t fire_brake_ticks = 0U;
-static uint8_t keep_aim_after_fire = 0U;
-static uint16_t auto_fire_tick = 0U;
-static uint16_t jam_ticks = 0U;
-static Jam_State_e jam_state = JAM_IDLE;
-static float jam_target_angle = 0.0f;
-static uint16_t jam_timer = 0U;
-
+static uint8_t fire_step = 0U;            // 单发流程状态：0待机 1拨弹中 2刹车停盘
+static uint8_t fire_brake_ticks = 0U;     // 刹车阶段持续周期计数
+static uint8_t keep_aim_after_fire = 0U;  // 单发结束后是否保持自瞄模式
+static uint16_t auto_fire_tick = 0U;      // 自瞄触发计时，持续锁定后自动单发
+static uint16_t jam_ticks = 0U;           // 卡弹检测累计时间
+static Jam_State_e jam_state = JAM_IDLE;  // 卡弹处理状态机
+static float jam_target_angle = 0.0f;     // 解卡过程目标角度
+static uint16_t jam_timer = 0U;           // 解卡等待计时器
 /* ==================== 内部函数声明 ==================== */
 static void Shoot_Disable(void);
 static void Shoot_Stop(void);
@@ -78,7 +78,7 @@ void Shoot_Init(void)
 {
     DJI_Motor_Config fric_config = {
         .Type = DJI3508,
-        .Control_Type = NONE_LOOP,
+        .Control_Type = SPEED_LOOP,
         .Can_Config = {
             .can_handle = &hfdcan1,
             .tx_id = 0x200,
@@ -86,13 +86,13 @@ void Shoot_Init(void)
     };
 
     fric_config.Can_Config.rx_id = 0x201;
-    shoot.fric_motor_1 = DJI_Motor_Init(&fric_config);
+    shoot.fric_motor_LF = DJI_Motor_Init(&fric_config);
     fric_config.Can_Config.rx_id = 0x202;
-    shoot.fric_motor_2 = DJI_Motor_Init(&fric_config);
+    shoot.fric_motor_RF = DJI_Motor_Init(&fric_config);
     fric_config.Can_Config.rx_id = 0x203;
-    shoot.fric_motor_3 = DJI_Motor_Init(&fric_config);
+    shoot.fric_motor_LB = DJI_Motor_Init(&fric_config);
     fric_config.Can_Config.rx_id = 0x204;
-    shoot.fric_motor_4 = DJI_Motor_Init(&fric_config);
+    shoot.fric_motor_RB = DJI_Motor_Init(&fric_config);
 
     DJI_Motor_Config pluck_config = {
         .Type = DJI3508,
@@ -104,7 +104,6 @@ void Shoot_Init(void)
         },
     };
     shoot.Pluck_motor = DJI_Motor_Init(&pluck_config);
-
     robot_cmd.shoot_mode = SHOOT_STOP;
     ResetShootState();
 }
@@ -112,8 +111,8 @@ void Shoot_Init(void)
 /* ==================== 发射主控制 ==================== */
 void Shoot_Control(void)
 {
-    if (shoot.Pluck_motor == NULL || shoot.fric_motor_1 == NULL || shoot.fric_motor_2 == NULL ||
-        shoot.fric_motor_3 == NULL || shoot.fric_motor_4 == NULL)
+    if (shoot.Pluck_motor == NULL || shoot.fric_motor_LF == NULL || shoot.fric_motor_RF == NULL ||
+        shoot.fric_motor_LB == NULL || shoot.fric_motor_RB == NULL)
     {
         return;
     }
@@ -148,10 +147,10 @@ void Shoot_Control(void)
     case SHOOT_READY_NOFRIC:
     {
         DJI_Motor_Instance *fric_motors[4] = {
-            shoot.fric_motor_1,
-            shoot.fric_motor_2,
-            shoot.fric_motor_3,
-            shoot.fric_motor_4,
+            shoot.fric_motor_LF,
+            shoot.fric_motor_RF,
+            shoot.fric_motor_LB,
+            shoot.fric_motor_RB,
         };
         int16_t txbuffer[4] = {0};
 
@@ -160,7 +159,7 @@ void Shoot_Control(void)
             PID_Control(fric_motors[i]->Data.SpeedFilter, 0.0f, &Fric_Speed_PID[i]);
             txbuffer[i] = (int16_t)Fric_Speed_PID[i].pid_out;
         }
-        DJI_Motor_CAN_TxMessage(shoot.fric_motor_1, txbuffer);
+        DJI_Motor_CAN_TxMessage(shoot.fric_motor_LF, txbuffer);
         PluckHold();
         break;
     }
@@ -214,10 +213,10 @@ void Shoot_Control(void)
 /* ==================== 停止/失能 ==================== */
 static void Shoot_Disable(void)
 {
-    DJIMotordisable(shoot.fric_motor_1);
-    DJIMotordisable(shoot.fric_motor_2);
-    DJIMotordisable(shoot.fric_motor_3);
-    DJIMotordisable(shoot.fric_motor_4);
+    DJIMotordisable(shoot.fric_motor_LF);
+    DJIMotordisable(shoot.fric_motor_RF);
+    DJIMotordisable(shoot.fric_motor_LB);
+    DJIMotordisable(shoot.fric_motor_RB);
     DJIMotordisable(shoot.Pluck_motor);
 
     ResetShootState();
@@ -226,10 +225,10 @@ static void Shoot_Disable(void)
 static void Shoot_Stop(void)
 {
     DJI_Motor_Instance *fric_motors[4] = {
-        shoot.fric_motor_1,
-        shoot.fric_motor_2,
-        shoot.fric_motor_3,
-        shoot.fric_motor_4,
+        shoot.fric_motor_LF,
+        shoot.fric_motor_RF,
+        shoot.fric_motor_LB,
+        shoot.fric_motor_RB,
     };
     int16_t txbuffer[4] = {0};
 
@@ -238,7 +237,7 @@ static void Shoot_Stop(void)
         PID_Control(fric_motors[i]->Data.SpeedFilter, 0.0f, &Fric_Speed_PID[i]);
         txbuffer[i] = (int16_t)Fric_Speed_PID[i].pid_out;
     }
-    DJI_Motor_CAN_TxMessage(shoot.fric_motor_1, txbuffer);
+    DJI_Motor_CAN_TxMessage(shoot.fric_motor_LF, txbuffer);
 
     DJI_Motor_CAN_TxMessage(shoot.Pluck_motor, (int16_t[4]){0});
 
@@ -295,8 +294,8 @@ static void JamCheck(void)
 /* ==================== 热量检查 ==================== */
 static void HeatCheck(void)
 {
-    uint16_t remain;
-    uint8_t cooling_rate;
+    uint16_t remain;    // 当前热量剩余值
+    uint8_t cooling_rate;// 当前散热速率
     float heat_margin;
     const float cool_enter_threshold = SHOOT_UNIT_HEAT_42MM * 1.2f;
     const float cool_exit_threshold = SHOOT_UNIT_HEAT_42MM * 1.8f;
@@ -351,8 +350,15 @@ static void PluckHold(void)
     tx[0] = (int16_t)limit(Pluck_Speed_PID.pid_out, 15000.0f, -15000.0f);
     DJI_Motor_CAN_TxMessage(shoot.Pluck_motor, tx);
 }
-
 /* ==================== 单发控制 ==================== */
+/**
+ * @brief 单发状态机
+ *
+ * fire_step:
+ * 0 -> 设置目标角度（拨一发）
+ * 1 -> PID控制拨盘转到目标位置
+ * 2 -> 反向刹车，防止惯性过冲导致连发
+ */
 static void SingleFire(uint8_t keep_aim_mode)
 {
     float angle_err;
@@ -420,10 +426,10 @@ static void FricWheelControl(void)
     };
 
     DJI_Motor_Instance *fric_motors[4] = {
-        shoot.fric_motor_1,
-        shoot.fric_motor_2,
-        shoot.fric_motor_3,
-        shoot.fric_motor_4,
+        shoot.fric_motor_LF,
+        shoot.fric_motor_RF,
+        shoot.fric_motor_LB,
+        shoot.fric_motor_RB,
     };
 
     int16_t txbuffer[4] = {0};
@@ -434,10 +440,18 @@ static void FricWheelControl(void)
         txbuffer[i] = (int16_t)Fric_Speed_PID[i].pid_out;
     }
 
-    DJI_Motor_CAN_TxMessage(shoot.fric_motor_1, txbuffer);
+    DJI_Motor_CAN_TxMessage(shoot.fric_motor_LF, txbuffer);
 }
 
 /* ==================== 卡弹处理 ==================== */
+/**
+ * @brief 卡弹恢复状态机
+ *
+ * JAM_IDLE     : 初始化解卡流程
+ * JAM_BACKWARD : 拨盘反转退弹
+ * JAM_WAIT     : 等待机构稳定
+ * JAM_FORWARD  : 正转复位
+ */
 static void JamHandle(void)
 {
     float current_angle = (float)shoot.Pluck_motor->Data.Continuous_Mechanical_angle;
@@ -498,4 +512,20 @@ static void JamHandle(void)
         }
         break;
     }
+}
+uint8_t CheckFricSpeedReady(void)
+{
+    if (shoot.fric_motor_LF == NULL || shoot.fric_motor_RF == NULL ||
+        shoot.fric_motor_LB == NULL || shoot.fric_motor_RB == NULL)
+    {
+        return 0U;
+    }
+    if (fabsf(shoot.fric_motor_LF->Data.SpeedFilter) < SHOOT_SPEED_Front ||
+        fabsf(shoot.fric_motor_RF->Data.SpeedFilter) < SHOOT_SPEED_Front ||
+        fabsf(shoot.fric_motor_LB->Data.SpeedFilter) < SHOOT_SPEED_Behind ||
+        fabsf(shoot.fric_motor_RB->Data.SpeedFilter) < SHOOT_SPEED_Behind)
+    {
+        return 0U;
+    }
+    return 1U;
 }

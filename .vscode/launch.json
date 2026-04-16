@@ -4,10 +4,6 @@
     // 欲了解更多信息，请访问: https://go.microsoft.com/fwlink/?linkid=830387
     "version": "0.2.0",
     "configurations": [
-        
-
-
-
         {
             "cwd": "${workspaceRoot}",
             "executable": "./build/Debug/sinserely.elf",
@@ -23,7 +19,7 @@
             "svdFile": "D:\\SVD\\STM32H723.svd",
             "liveWatch": {
                 "enabled": true,
-                "samplesPerSecond": 4
+                "samplesPerSecond": 4,
             },
             "serverpath": "D:/xpack-openocd-0.12.0-7-win32-x64/xpack-openocd-0.12.0-7/bin/openocd.exe",
             "searchDir": [
@@ -31,26 +27,25 @@
             ],
             "runToEntryPoint": "main",
             "showDevDebugOutput": "none",
-            "gdbPath": "C:/Users\\lenovo\\AppData\\Local\\stm32cube\\bundles\\gnu-tools-for-stm32\\14.3.1+st.2\\bin\\arm-none-eabi-gdb.exe"
+            "gdbPath": "C:/Users\\lenovo\\AppData\\Local\\stm32cube\\bundles\\gnu-tools-for-stm32\\14.3.1+st.2\\bin\\arm-none-eabi-gdb.exe",
         },
         {
             "cwd": "${workspaceFolder}",
             "executable": "./build/Debug/sinserely.elf",
             "name": "JLink",
             "request": "launch",
-            "type": "cortex-debug",
-            "servertype": "jlink",
-            "device": "STM32H723VE",
             "rtos": "FreeRTOS",
-            "svdFile": "D:\\SVD\\STM32H723.svd",
-            "showDevDebugOutput": "parsed",
-            "runToEntryPoint": "main",
             "liveWatch": {
                 "enabled": true,
                 "samplesPerSecond": 5
             },
-
-            
-        }
+            "swoConfig": {},
+            "type": "cortex-debug",
+            "device": "STM32H723VE",
+            "runToEntryPoint": "main",
+            "svdFile": "D:\\SVD\\STM32H723.svd",
+            "showDevDebugOutput": "none",
+            "servertype": "jlink",
+        },
     ]
 }

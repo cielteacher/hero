@@ -26,11 +26,7 @@ void Task_Alive(void *pvParameters)
     DR16_AliveCheck();
     MiniPC_AliveCheck();
     Can_Comm_AliveCheck();
-    
-  SEGGER_RTT_Write(0, &INS_Info.Pitch_Angle, sizeof(float));
-  SEGGER_RTT_Write(0, &INS_Info.Yaw_Angle, sizeof(float));
-  SEGGER_RTT_Write(0, &INS_Info.Roll_Angle, sizeof(float));
-    vTaskDelay(5);
+    vTaskDelay(1);
   }
 }
 

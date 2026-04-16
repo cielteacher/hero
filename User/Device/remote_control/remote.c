@@ -111,6 +111,8 @@ static void SBUS_TO_RC(uint8_t *sbus_buf)
         case RC_MODE_KEY_MOUSE:
             instance->control_data.input_mode = KEY_MOUSE_INPUT;
             break;
+        case RC_MODE_STOP:
+            instance->control_data.input_mode = Control_Stop;
         default:
             break;
     }
@@ -147,7 +149,7 @@ static void SBUS_TO_RC(uint8_t *sbus_buf)
     if (instance->control_data.press_l)
     {
         l_press_time++;
-        if (l_press_time >= 500)
+        if (l_press_time >= 50) // 长按阈值约50 * 18ms = 900ms
             instance->control_data.long_press_l = true;
     }
     else
@@ -159,7 +161,7 @@ static void SBUS_TO_RC(uint8_t *sbus_buf)
     if (instance->control_data.press_r)
     {
         r_press_time++;
-        if (r_press_time >= 500)
+        if (r_press_time >= 50)
             instance->control_data.long_press_r = true;
     }
     else
