@@ -1,6 +1,8 @@
 ﻿/**
  * @file    Gimbal.c
  * @brief   云台执行层，执行cmd文件的指令 - 电机PID控制
+ * @todo    1. 通过标定法测量重力补偿，从而计算出前馈
+ *          2. pitch轴非自瞄模式下采用机械角度反馈控制
  */
 #include "Gimbal.h"
 #include "PID.h"
@@ -18,18 +20,18 @@
 Gimbal_t gimbal = {0};
 extern Robot_ctrl_cmd_t robot_cmd;
 
-#define CENTER_STABLE_TICKS    200U
-#define CENTER_YAW_DEADBAND  0.1f
-#define CENTER_PITCH_DEADBAND 0.1f
-#define GIMBAL_STOP_OUT_MAX               14000.0f
+#define CENTER_STABLE_TICKS    200U //归中
+#define CENTER_YAW_DEADBAND  0.1f   // 归中死区，单位度，过小可能导致长时间震荡过大可能导致归中不够精确
+#define CENTER_PITCH_DEADBAND 0.1f  // 归中死区，单位度，过小可能导致长时间震荡过大可能导致归中不够精确
+#define GIMBAL_STOP_OUT_MAX   24000.0f // 云台输出限幅
 
-uint8_t power_on_center_flag = 0U;
+uint8_t power_on_center_flag = 0U;// 上电归中标志位，置位后才允许正常控制逻辑
 static uint16_t gimbal_poweron_center_stable_cnt = 0U;
 
 typedef enum
 {
     PID_GYRO = 0,
-    PID_MECH = 1, // 保留索引位，避免历史 PID 参数表下标变化
+    PID_MECH = 1, 
     PID_CENTER = 2,
     PID_AIM = 3,
 } GimbalPidMode_e;
@@ -177,6 +179,8 @@ void Gimbal_Control(void)
             // 上电归中完成，允许进入正常控制逻辑,更新位置数据，防止突变
             robot_cmd.Gyro_Position_Yaw = INS_Info.Yaw_TolAngle;
             robot_cmd.Gyro_Position_Pitch = INS_Info.Pitch_Angle;
+            robot_cmd.Mech_Position_Yaw = gimbal.yaw_motor->Data.DJI_data.Continuous_Mechanical_angle;
+            robot_cmd.Mech_Position_Pitch = gimbal.pitch_motor->Data.DJI_data.Continuous_Mechanical_angle;
         }
         return;
     }
@@ -243,10 +247,3 @@ static void Gimbal_Stop(void)
     DM_Motor_DJI_CAN_TxMessage(gimbal.yaw_motor, can_send);
     ResetGimbalPidIout();
 }
-
-
-
-
-
-
-

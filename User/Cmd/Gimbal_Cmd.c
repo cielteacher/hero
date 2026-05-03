@@ -3,6 +3,7 @@
  * @brief   云台决策层 - 模式决策、目标更新、板间通信
  */
 #include "Gimbal_Cmd.h"
+#include "Gimbal.h"
 #include "PID.h"
 #include "arm_math.h"
 #include "bsp_fdcan.h"
@@ -90,7 +91,7 @@ static uint8_t CheckShootOnline(void)
  */
 static uint8_t VisionCanAutoAim(void)
 {
-    if(MiniPC_instance.MiniPC_Online_Flag &&MiniPC_instance.receive_data.data.dis <= 0.2f)
+    if(MiniPC_instance.MiniPC_Online_Flag &&MiniPC_instance.receive_data.data.dis >= 0.2f)
     {
         return 1U;
     }
@@ -112,6 +113,8 @@ void Robot_Init(void)
     robot_cmd.Mid_mode = MID_FRONT;// 默认前方归中
     robot_cmd.Gyro_Position_Pitch = INS_Info.Pitch_Angle;
     robot_cmd.Gyro_Position_Yaw = INS_Info.Yaw_TolAngle;
+    robot_cmd.Mech_Position_Pitch = 0;
+    robot_cmd.Mech_Position_Yaw = 0;
     Gimbal_Init();
     Shoot_Init();
 
@@ -215,7 +218,7 @@ static void RCUpdate(void)
  * Ctrl+G组合键触发底盘解限
  * B键切换摩擦轮状态（开启or关闭）
  * Shift键按时加速
- * F键按 下 时就近归中（和上电归中逻辑一致）(优先等级很高)
+ * F键按 下 一键掉头归中（和上电归中逻辑一致）(优先等级很高)
  * E键按 住 时取消跟随，进入底盘分离模式
  * Q键按 住 时进入小陀螺模式
  * 长按鼠标右键开启自瞄（自瞄可以识别则自瞄算法接管云台+发射机构反之，操作手位控云台）
@@ -234,6 +237,8 @@ static void KMUpdate(void)
     if (DR16_instance.control_data.keys.bits.Ctrl && DR16_instance.control_data.keys.bits.R &&
         !DR16_instance.control_data.last_keys.bits.R)
     {
+        // 复位前关闭所有中断
+        __set_FAULTMASK(1); 
         NVIC_SystemReset();
     }
     // Ctrl+G组合键触发底盘解限（自爆？）
@@ -315,6 +320,8 @@ static void Gimbal_Target_Update(void)
         case GIMBAL_DISABLED:// 全失能状态，直接退出
             robot_cmd.Gyro_Position_Pitch = INS_Info.Pitch_Angle;
             robot_cmd.Gyro_Position_Yaw = INS_Info.Yaw_TolAngle;
+            robot_cmd.Mech_Position_Pitch = gimbal.pitch_motor != NULL ? gimbal.pitch_motor->Data.DJI_data.Continuous_Mechanical_angle : 0;
+            robot_cmd.Mech_Position_Yaw = gimbal.yaw_motor != NULL ? gimbal.yaw_motor->Data.DJI_data.Continuous_Mechanical_angle : 0;
             return;
         break;
         case GIMBAL_STOP:// 停止状态，保持当前角度(保持不住....)
@@ -324,13 +331,13 @@ static void Gimbal_Target_Update(void)
         case GIMBAL_RUNNING://  遥控器or键鼠
             if (robot_cmd.Control_mode == CONTROL_KEY_MOUSE)
             {
-                robot_cmd.Gyro_Position_Pitch += DR16_instance.control_data.y / (float)MOUSE_MAX * MOUSE_PITCH_SENSITIVITY;
-                robot_cmd.Gyro_Position_Yaw +=   DR16_instance.control_data.x / (float)MOUSE_MAX * MOUSE_YAW_SENSITIVITY;
+                robot_cmd.Gyro_Position_Pitch += DR16_instance.control_data.Postion_y / (float)MOUSE_MAX * MOUSE_PITCH_SENSITIVITY;
+                robot_cmd.Gyro_Position_Yaw +=   DR16_instance.control_data.Postion_x / (float)MOUSE_MAX * MOUSE_YAW_SENSITIVITY;
             }
             else if (robot_cmd.Control_mode == CONTROL_REMOTE)
             {
-                robot_cmd.Gyro_Position_Pitch += DR16_instance.control_data.Normalize_ch2 * RC_YAW_SENSITIVITY;
-                robot_cmd.Gyro_Position_Yaw   += DR16_instance.control_data.Normalize_ch3 * RC_PITCH_SENSITIVITY;
+                robot_cmd.Gyro_Position_Pitch += DR16_instance.control_data.Normalize_ch2 * RC_PITCH_SENSITIVITY;
+                robot_cmd.Gyro_Position_Yaw   += DR16_instance.control_data.Normalize_ch3 * RC_YAW_SENSITIVITY;
             }
         break;
         case GIMBAL_RUNNING_AIM:// 自瞄做一个就近转位
@@ -562,6 +569,6 @@ static void Chassis_Comm_Update()
         Gimbal_To_Chassis.rotate = (int16_t)(slopeningV.Omega * 2000.0f);
     
     chassis_send:
+    Gimbal_To_Chassis.Chassis_Mode = robot_cmd.chassis_mode;
     CAN_Send(can_comm_instance.can_comm, (uint8_t *)&Gimbal_To_Chassis, 10.0f);
-
 }

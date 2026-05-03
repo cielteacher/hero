@@ -99,8 +99,8 @@ void Shoot_Init(void)
         .Control_Type = NONE_LOOP,
         .Can_Config = {
             .can_handle = &hfdcan2,
-            .tx_id = 0x200,
-            .rx_id = 0x201,
+            .tx_id = 0x1FE,
+            .rx_id = 0x206,
         },
     };
     shoot.Pluck_motor = DJI_Motor_Init(&pluck_config);
@@ -179,7 +179,7 @@ void Shoot_Control(void)
 
     case SHOOT_AIM:
         FricWheelControl();
-        if (MiniPC_instance.MiniPC_Online_Flag && MiniPC_instance.receive_data.data.dis <= 0.2f)
+        if (MiniPC_instance.MiniPC_Online_Flag && MiniPC_instance.receive_data.data.dis >= 0.2f)
         {
             auto_fire_tick++;
             if (auto_fire_tick >= 80U)

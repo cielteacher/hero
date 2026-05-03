@@ -42,7 +42,16 @@
 
 /* Private macro -------------------------------------------------------------*/
 /* USER CODE BEGIN PM */
-
+void dwt_init_for_rtos(void)
+{
+    if (!(CoreDebug->DEMCR & CoreDebug_DEMCR_TRCENA_Msk))
+        CoreDebug->DEMCR |= CoreDebug_DEMCR_TRCENA_Msk;
+    if (!(DWT->CTRL & DWT_CTRL_CYCCNTENA_Msk))
+    {
+        DWT->CYCCNT = 0;
+        DWT->CTRL |= DWT_CTRL_CYCCNTENA_Msk;
+    }
+}
 /* USER CODE END PM */
 
 /* Private variables ---------------------------------------------------------*/

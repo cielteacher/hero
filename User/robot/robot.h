@@ -11,6 +11,7 @@
 #ifndef __ROBOT_H
 #define __ROBOT_H
 
+#include <math.h>
 #include <stdint.h>
 #include "stdbool.h"
 #include "RMLibHead.h"
@@ -100,16 +101,16 @@ typedef struct  {
     int16_t vx;            	// 单位 基准速度的倍率（基准速度由底盘模块根据功率自动计算）
     int16_t vy;            	// 单位 基准速度的倍率
     int16_t rotate;        	// 单位 旋转速度度每秒
-	  Gimbal_Flag flag;	   	//!< @brief 底盘关闭标志位
+	Gimbal_Flag flag;	   	//!< @brief 底盘关闭标志位
     uint8_t Chassis_Mode;     //!< @brief 底盘模式
 } Gimbal_board_send_t;
 // 云台<-底盘数据包
 typedef struct {
-  int16_t chassis_gyro;  // 将底盘主控的imu数据发到云台
-  int16_t chassis_slop;  // 底盘所在斜坡倾角
-  uint8_t game_progress; // 比赛状态
-uint16_t heat_limit_remain;   // 剩余热量
-uint8_t shoot_barrel_cooling; // 枪口热量冷却值
+    int16_t chassis_gyro;  // 将底盘主控的imu数据发到云台
+    int16_t chassis_slop;  // 底盘所在斜坡倾角
+    uint8_t game_progress; // 比赛状态
+    uint16_t heat_limit_remain;   // 剩余热量
+    uint8_t shoot_barrel_cooling; // 枪口热量冷却值
 } Chassis_board_send_t;
 #pragma pack()
 /* ============ 数据结构定义 ============ */
@@ -212,7 +213,8 @@ typedef struct {
     /* ===== 云台陀螺仪参考 (IMU坐标系) ===== */
     float Gyro_Position_Yaw;                 //!< Yaw目标位置 (度, 连续累计)
     float Gyro_Position_Pitch;               //!< Pitch目标位置 (度, -180~180)
-
+    float Mech_Position_Yaw;                 //!< Yaw目标位置 (编码器单位, 连续累计)
+    float Mech_Position_Pitch;               //!< Pitch目标位置 (编码器单位, 连续累计)
 } Robot_ctrl_cmd_t;
 #endif
 

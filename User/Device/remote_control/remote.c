@@ -137,9 +137,9 @@ static void SBUS_TO_RC(uint8_t *sbus_buf)
     // 位置增量计算
     if (control_time >= 10 && control_time <= 100) 
     {
-        instance->control_data.Postion_x = mouse_x * control_time * 0.1f;
-        instance->control_data.Postion_y = mouse_y * control_time * 0.1f;
-        instance->control_data.Postion_z = mouse_z * control_time * 0.1f;
+        instance->control_data.Postion_x = mouse_x * control_time * 0.01f;
+        instance->control_data.Postion_y = mouse_y * control_time * 0.01f;
+        instance->control_data.Postion_z = mouse_z * control_time * 0.01f;
     }
     
     // 鼠标长按检测

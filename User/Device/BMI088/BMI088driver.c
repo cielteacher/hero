@@ -324,11 +324,10 @@ void BMI088_Info_Update(BMI088_Info_Typedef *BMI088_Info)
       BMI088_Info->MPU_Info.Gyro_X = (int16_t)((buf[3] << 8) | buf[2]);
       BMI088_Info->MPU_Info.Gyro_Y = (int16_t)((buf[5] << 8) | buf[4]);
       BMI088_Info->MPU_Info.Gyro_Z = (int16_t)((buf[7] << 8) | buf[6]);
-            BMI088_Info->imu_online_flag = 1U;
-            BMI088_Info->Last_Update_Time = DWT_GetTime_ms();
-        }
-        else
-        {
+      BMI088_Info->imu_online_flag = 1U;
+    }
+    else
+    {
             BMI088_Info->imu_online_flag = 0U;
     }
 
@@ -338,32 +337,13 @@ void BMI088_Info_Update(BMI088_Info_Typedef *BMI088_Info)
 	BMI088_Info->Gyro[2] =   BMI088_GYRO_SEN * BMI088_Info->MPU_Info.Gyro_Z - BMI088_Info->Offsets_Gyro_Z;
 }
 
-void BMI088_AliveCheck(void)
-{
-    uint32_t now = DWT_GetTime_ms();
-    if (now - BMI088_Info.Last_Update_Time > BMI088_OFFLINE_TIMEOUT_MS)
-    {
-        BMI088_Info.imu_online_flag = 0U;
-    }
-}
 
 void INS_AliveCheck(void)
 {
-    uint32_t now = DWT_GetTime_ms();
-
     if (BMI088_Info.imu_online_flag == 0U)
     {
         INS_Info.INS_online_flag = 0U;
         return;
-    }
-
-    if (now - INS_Info.INS_last_rx_time_ms > INS_OFFLINE_TIMEOUT_MS)
-    {
-        INS_Info.INS_online_flag = 0U;
-    }
-    else
-    {
-        INS_Info.INS_online_flag = 1U;
     }
 }
 

@@ -6,7 +6,7 @@
     "configurations": [
         {
             "cwd": "${workspaceRoot}",
-            "executable": "./build/Debug/sinserely.elf",
+            "executable": "./build/Debug/sincerely_no_groycheck.elf",
             "name": "Daplink",
             "request": "launch",
             "type": "cortex-debug",
@@ -31,7 +31,7 @@
         },
         {
             "cwd": "${workspaceFolder}",
-            "executable": "./build/Debug/sinserely.elf",
+            "executable": "./build/Debug/sincerely_no_groycheck.elf",
             "name": "JLink",
             "request": "launch",
             "rtos": "FreeRTOS",

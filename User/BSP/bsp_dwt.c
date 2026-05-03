@@ -6,7 +6,7 @@ static uint32_t CPU_FREQ_HZ_US;//CPU....单位每us
 static uint32_t CPU_FREQ_HZ_MS;//CPU....单位每ms
 
 static uint32_t CYCCNT_LAST = 0;//上次计数
-static uint32_t CYCCNT_ROUND = 0;//计数周期数，将25秒的dwt计数拓展
+static uint32_t CYCCNT_ROUND = 0;//计数周期数，将8.94秒的dwt计数拓展
 
 
 /**

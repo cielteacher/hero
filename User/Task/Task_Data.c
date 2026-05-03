@@ -12,29 +12,30 @@
 #include "bsp_pwm.h"
 #include "Quaternion.h"
 #include "bsp_dwt.h"
-#include "SEGGER_RTT.h"
 //目前数据更新任务全部加着临界区
 void Task_Alive(void *pvParameters)
 {
+  TickType_t Task_Alive_SysTick = 0;
+	Task_Alive_SysTick = xTaskGetTickCount();
   for (;;)
   {
     FDCAN_Restart();
     DM_Motor_AliveCheck();
     DJI_Motor_AliveCheck();
-    BMI088_AliveCheck();
     INS_AliveCheck();
     DR16_AliveCheck();
     MiniPC_AliveCheck();
     Can_Comm_AliveCheck();
-    vTaskDelay(1);
+    vTaskDelayUntil(&Task_Alive_SysTick, 5);
   }
 }
 
 
-void   Task_Minipc(void *pvParameters)
+void Task_Minipc(void *pvParameters)
 {    
-	for(;;){
-				SendData_t INS_Data = {
+	for(;;)
+  {
+		SendData_t INS_Data = {
         .frame_header.id = SEND_IMU_DATA_ID,
         .frame_header.len = sizeof(SendData_t),
         .frame_header.sof = SEND_SOF,
@@ -45,14 +46,13 @@ void   Task_Minipc(void *pvParameters)
             .yaw = INS_Info.Yaw_Angle ,   
             .pitch = INS_Info.Pitch_Angle ,        
             .roll = INS_Info.Roll_Angle ,
-
-            .yaw_vel = INS_Info.Yaw_Gyro ,   // rad/s
-            .pitch_vel = INS_Info.Pitch_Gyro , // rad/s
-            .roll_vel = INS_Info.Roll_Gyro ,  // rad/s
+            .yaw_vel = INS_Info.Yaw_Gyro ,   // °/s
+            .pitch_vel = INS_Info.Pitch_Gyro , // °/s
+            .roll_vel = INS_Info.Roll_Gyro ,  // °/s
         }};
-			INS_Data.data.bullet_speed = 0; // 子弹速度（如果有的话
-        MiniPC_Send((uint8_t*)&INS_Data,sizeof(INS_Data));
-					vTaskDelay(1);
+		INS_Data.data.bullet_speed = 0; // 子弹速度（如果有的话
+    MiniPC_Send((uint8_t*)&INS_Data,sizeof(INS_Data));
+		vTaskDelay(1);
 	}
 	
 
@@ -99,17 +99,8 @@ static float QuaternionEKF_P_Data[36] = {100000, 0.1, 0.1, 0.1, 0.1, 0.1,
   // 主循环
   for (;;) 
 	{		
-
-
-
 		/* Update the BMI088 measurement */
     BMI088_Info_Update(&BMI088_Info);
-
-    if (BMI088_Info.imu_online_flag)
-    {
-      INS_Info.INS_last_rx_time_ms = DWT_GetTime_ms();
-    }
-
     /* Accel measurement LPF2p */
     INS_Info.Accel[0]   =   LowPassFilter2p_Update(&INS_AccelPF2p[0],BMI088_Info.Accel[0]);
     INS_Info.Accel[1]   =   LowPassFilter2p_Update(&INS_AccelPF2p[1],BMI088_Info.Accel[1]);

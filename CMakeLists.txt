@@ -13,21 +13,21 @@ if(NOT CMAKE_BUILD_TYPE)
     set(CMAKE_BUILD_TYPE "Debug")
 endif()
 
-set(CMAKE_PROJECT_NAME sinserely)
+set(CMAKE_PROJECT_NAME sincerely_no_groycheck)
 set(CMAKE_EXPORT_COMPILE_COMMANDS TRUE)
 
 # 启用 C/C++/汇编
 project(${CMAKE_PROJECT_NAME} LANGUAGES C CXX ASM)
 message("Build type: " ${CMAKE_BUILD_TYPE})
 
-add_executable(${CMAKE_PROJECT_NAME})
+add_executable(${CMAKE_PROJECT_NAME}
+    User/Algorithm/MPC.h)
 add_subdirectory(cmake/stm32cubemx)
 
 # 自动扫描用户代码
 file(GLOB SOURCES 
 "${CMAKE_SOURCE_DIR}/User/BSP/*.c" 
 "${CMAKE_SOURCE_DIR}/User/BSP/*.cpp" 
-"${CMAKE_SOURCE_DIR}/SystemView/SEGGER/*.c"
 "${CMAKE_SOURCE_DIR}/SystemView/Sample/FreeRTOSV10/*.c"
 "${CMAKE_SOURCE_DIR}/SystemView/Sample/FreeRTOSV10/Config/Cortex-M/*.c"
 "${CMAKE_SOURCE_DIR}/User/device/BMI088/*.c" 
@@ -50,9 +50,6 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE ${SOURCES})
 
 # 头文件路径
 target_include_directories(${CMAKE_PROJECT_NAME} PRIVATE
-    SystemView/SEGGER
-    SystemView/Config
-    SystemView/Sample/FreeRTOSV10
     User/device/BMI088
     User/device/motor
     User/device/music

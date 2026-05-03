@@ -26,6 +26,7 @@
 #ifdef __cplusplus
 extern "C"
 {
+}
 #endif
 /* include  */
 #include "RMLibHead.h"
@@ -270,6 +271,6 @@ do                             \
   /**
    * @brief Update the Kalman Filter according to the specified parameters in the KalmanFilter_Info_TypeDef.
    */
-  extern float *  Kalman_Filter_Update(KalmanFilter_Info_TypeDef *KF);
+  extern float * Kalman_Filter_Update(KalmanFilter_Info_TypeDef *KF);
 
 #endif 
