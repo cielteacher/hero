@@ -10,12 +10,6 @@ void Task_Robot_Control(void *pvParameters)
 {
 	TickType_t Task_Robot_Control_SysTick = 0;
 	Task_Robot_Control_SysTick = xTaskGetTickCount();
-	PID test = {.Kp = 0.1f,
-	.Ki = 0,
-	.Kd = 0,
-.outlimit = 10000,
-.DeadBand = 10,
-.dt = 1,};
 	int16_t can_send[4] = {0};
 	can_send[1] = 500;
 	for(;;)
